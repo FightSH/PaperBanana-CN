@@ -120,7 +120,7 @@ def create_sample_inputs(method_content, caption, diagram_type="Pipeline", aspec
 
     return inputs
 
-async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", retrieval_setting="auto", model_name="", image_model_name="", provider="evolink", api_key=""):
+async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", retrieval_setting="auto", model_name="", image_model_name="", provider="evolink", api_key="", multi_config=None):
     """使用 PaperVizProcessor 并行处理多个候选方案。"""
     print(f"\n{'='*60}")
     print(f"[DEBUG] process_parallel_candidates 开始")
@@ -132,7 +132,16 @@ async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", 
     # 使用界面传入的 API Key 初始化 Provider
     if api_key:
         from utils import generation_utils
-        if provider == "evolink":
+        if provider == "multi" and multi_config:
+            generation_utils.init_multi_provider(
+                text_api_style=multi_config["text_api_style"],
+                text_api_key=multi_config["text_api_key"],
+                text_base_url=multi_config["text_base_url"],
+                image_api_style=multi_config["image_api_style"],
+                image_api_key=multi_config["image_api_key"],
+                image_base_url=multi_config["image_base_url"],
+            )
+        elif provider == "evolink":
             generation_utils.init_evolink_provider(api_key)
         elif provider == "gemini":
             generation_utils.init_gemini_client(api_key)
@@ -174,8 +183,10 @@ async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", 
         ):
             results.append(result_data)
     finally:
-        # 关闭 Evolink Provider 的共享 session，避免资源泄漏
+        # 关闭 Provider 的共享 session，避免资源泄漏
         from utils import generation_utils
+        if generation_utils.multi_provider and hasattr(generation_utils.multi_provider, 'close'):
+            await generation_utils.multi_provider.close()
         if generation_utils.evolink_provider and hasattr(generation_utils.evolink_provider, 'close'):
             await generation_utils.evolink_provider.close()
 
@@ -496,10 +507,10 @@ def main():
             # Provider 选择
             provider = st.selectbox(
                 "API Provider",
-                ["gemini", "evolink"],
+                ["gemini", "evolink", "multi"],
                 index=0,
                 key="tab1_provider",
-                help="gemini：Google 官方 API（需翻墙）| evolink：国内代理"
+                help="gemini：Google 官方 API（需翻墙）| evolink：国内代理 | multi：文本和图像使用不同的 API"
             )
 
             # Provider 对应的默认配置
@@ -516,6 +527,13 @@ def main():
                     "api_key_help": "Google AI Studio API 密钥",
                     "api_key_default": get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", ""),
                     "model_name": "gemini-2.5-flash-preview-05-20",
+                    "image_model_name": "gemini-2.0-flash-preview-image-generation",
+                },
+                "multi": {
+                    "api_key_label": "",  # multi 模式不用单一 key
+                    "api_key_help": "",
+                    "api_key_default": "",
+                    "model_name": "gemini-2.5-flash",
                     "image_model_name": "gemini-2.0-flash-preview-image-generation",
                 },
             }
@@ -539,13 +557,65 @@ def main():
                 st.session_state["tab1_api_key"] = _pd["api_key_default"]
                 st.rerun()
 
-            # API Key
-            api_key = st.text_input(
-                _pd["api_key_label"],
-                type="password",
-                key="tab1_api_key",
-                help=_pd["api_key_help"]
-            )
+            if provider == "multi":
+                # ---- MultiProvider: 文本和图像分别配置 ----
+                st.markdown("---")
+                st.markdown("**文本 API 配置**")
+                _multi_text_cfg = model_config_data.get("multi", {}).get("text", {})
+                text_api_style = st.selectbox(
+                    "文本 API 风格",
+                    ["openai", "gemini"],
+                    index=0,
+                    key="tab1_multi_text_style",
+                    help="openai: OpenAI 兼容接口 | gemini: Google Gemini 原生接口"
+                )
+                text_api_key = st.text_input(
+                    "文本 API Key",
+                    type="password",
+                    value=_multi_text_cfg.get("api_key", ""),
+                    key="tab1_multi_text_key",
+                )
+                text_base_url = st.text_input(
+                    "文本 Base URL",
+                    value=_multi_text_cfg.get("base_url", ""),
+                    key="tab1_multi_text_url",
+                    help="如 https://api.siliconflow.cn"
+                )
+
+                st.markdown("**图像 API 配置**")
+                _multi_image_cfg = model_config_data.get("multi", {}).get("image", {})
+                image_api_style = st.selectbox(
+                    "图像 API 风格",
+                    ["openai", "gemini"],
+                    index=1,
+                    key="tab1_multi_image_style",
+                    help="openai: OpenAI 兼容接口 | gemini: Google Gemini 原生接口"
+                )
+                image_api_key = st.text_input(
+                    "图像 API Key",
+                    type="password",
+                    value=_multi_image_cfg.get("api_key", ""),
+                    key="tab1_multi_image_key",
+                )
+                image_base_url = st.text_input(
+                    "图像 Base URL",
+                    value=_multi_image_cfg.get("base_url", ""),
+                    key="tab1_multi_image_url",
+                    help="如 https://generativelanguage.googleapis.com"
+                )
+                st.markdown("---")
+
+                # multi 模式使用占位 api_key（实际 key 在上面分别配置）
+                api_key = "multi"
+            else:
+                # ---- 单一 Provider ----
+                # API Key
+                api_key = st.text_input(
+                    _pd["api_key_label"],
+                    type="password",
+                    key="tab1_api_key",
+                    help=_pd["api_key_help"]
+                )
 
             # 文本模型
             model_name = st.text_input(
@@ -560,6 +630,65 @@ def main():
                 key="tab1_image_model_name",
                 help="用于图像生成的模型名称"
             )
+
+            # ---- 测试连接按钮 ----
+            if provider == "multi":
+                col_t, col_i = st.columns(2)
+                with col_t:
+                    if st.button("测试文本", key="test_multi_text", use_container_width=True):
+                        _ts = st.session_state.get("tab1_multi_text_style", "openai")
+                        _tk = st.session_state.get("tab1_multi_text_key", "")
+                        _tu = st.session_state.get("tab1_multi_text_url", "")
+                        if not _tk or not _tu:
+                            st.error("请先填写文本 API Key 和 Base URL")
+                        else:
+                            with st.spinner("测试文本 API ..."):
+                                from providers.multi import MultiProvider as _MP
+                                _tp = _MP(
+                                    text_api_style=_ts, text_api_key=_tk, text_base_url=_tu,
+                                    image_api_style="openai", image_api_key="placeholder",
+                                    image_base_url="https://placeholder",
+                                )
+                                _res = asyncio.run(_tp.test_text_connection(model_name))
+                            if _res.startswith("Error"):
+                                st.error(_res)
+                            else:
+                                st.success(f"文本 API 正常: {_res}")
+                with col_i:
+                    if st.button("测试图像", key="test_multi_image", use_container_width=True):
+                        _is = st.session_state.get("tab1_multi_image_style", "gemini")
+                        _ik = st.session_state.get("tab1_multi_image_key", "")
+                        _iu = st.session_state.get("tab1_multi_image_url", "")
+                        if not _ik or not _iu:
+                            st.error("请先填写图像 API Key 和 Base URL")
+                        else:
+                            with st.spinner("测试图像 API ..."):
+                                from providers.multi import MultiProvider as _MP
+                                _ip = _MP(
+                                    text_api_style="openai", text_api_key="placeholder",
+                                    text_base_url="https://placeholder",
+                                    image_api_style=_is, image_api_key=_ik, image_base_url=_iu,
+                                )
+                                _res = asyncio.run(_ip.test_image_connection(image_model_name))
+                            if _res.startswith("Error"):
+                                st.error(_res)
+                            else:
+                                st.success(f"图像 API 正常: {_res}")
+            else:
+                if st.button("测试连接", key="test_provider_conn", use_container_width=True):
+                    if not api_key:
+                        st.error("请先填写 API Key")
+                    else:
+                        with st.spinner("测试连接 ..."):
+                            from utils import generation_utils
+                            if provider == "evolink":
+                                _res = asyncio.run(generation_utils.test_evolink_connection(api_key, model_name))
+                            else:
+                                _res = asyncio.run(generation_utils.test_gemini_connection(api_key, model_name))
+                        if _res.startswith("Error"):
+                            st.error(_res)
+                        else:
+                            st.success(f"连接正常: {_res}")
 
         st.divider()
 
@@ -684,6 +813,18 @@ The framework extends to statistical plots by adjusting the Visualizer and Criti
                         max_critic_rounds=max_critic_rounds
                     )
 
+                    # 构建 multi provider 配置（如果选中）
+                    _multi_cfg = None
+                    if provider == "multi":
+                        _multi_cfg = {
+                            "text_api_style": st.session_state.get("tab1_multi_text_style", "openai"),
+                            "text_api_key": st.session_state.get("tab1_multi_text_key", ""),
+                            "text_base_url": st.session_state.get("tab1_multi_text_url", ""),
+                            "image_api_style": st.session_state.get("tab1_multi_image_style", "gemini"),
+                            "image_api_key": st.session_state.get("tab1_multi_image_key", ""),
+                            "image_base_url": st.session_state.get("tab1_multi_image_url", ""),
+                        }
+
                     # 并行处理
                     try:
                         results = asyncio.run(process_parallel_candidates(
@@ -693,7 +834,8 @@ The framework extends to statistical plots by adjusting the Visualizer and Criti
                             model_name=model_name,
                             image_model_name=image_model_name,
                             provider=provider,
-                            api_key=api_key
+                            api_key=api_key,
+                            multi_config=_multi_cfg,
                         ))
                         st.session_state["results"] = results
                         st.session_state["exp_mode"] = exp_mode

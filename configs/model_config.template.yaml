@@ -24,3 +24,20 @@ api_keys:
   google_api_key: ""
   openai_api_key: ""
   anthropic_api_key: ""
+
+# Evolink Provider (OpenAI-compatible proxy for mainland China)
+# evolink:
+#   api_key: ""
+#   base_url: "https://api.evolink.ai"
+
+# MultiProvider — text and image use different API backends
+# Set provider="multi" in ExpConfig or the Streamlit sidebar to activate.
+# multi:
+#   text:
+#     api_style: "openai"          # "openai" or "gemini"
+#     api_key: ""
+#     base_url: ""                 # e.g. https://api.siliconflow.cn
+#   image:
+#     api_style: "gemini"          # "openai" or "gemini"
+#     api_key: ""
+#     base_url: ""                 # e.g. https://generativelanguage.googleapis.com

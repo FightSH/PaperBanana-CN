@@ -4,6 +4,7 @@ Provider 包 - 管理不同 API 提供商的接口
 
 from .base import BaseProvider
 from .evolink import EvolinkProvider
+from .multi import MultiProvider
 
 
 def create_provider(provider_name: str, **kwargs) -> BaseProvider:
@@ -11,7 +12,7 @@ def create_provider(provider_name: str, **kwargs) -> BaseProvider:
     工厂函数：根据名称创建 provider 实例
 
     Args:
-        provider_name: 提供商名称 ("evolink" 等)
+        provider_name: 提供商名称 ("evolink", "multi" 等)
         **kwargs: 传递给 provider 构造函数的参数
 
     Returns:
@@ -19,6 +20,7 @@ def create_provider(provider_name: str, **kwargs) -> BaseProvider:
     """
     providers = {
         "evolink": EvolinkProvider,
+        "multi": MultiProvider,
     }
 
     if provider_name not in providers:

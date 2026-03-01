@@ -47,6 +47,7 @@ def get_config_val(section, key, env_var, default=""):
 # ==================== Evolink Provider 初始化 ====================
 
 evolink_provider = None
+multi_provider = None
 
 evolink_api_key = get_config_val("evolink", "api_key", "EVOLINK_API_KEY", "")
 evolink_base_url = get_config_val("evolink", "base_url", "EVOLINK_BASE_URL", "https://api.evolink.ai")
@@ -57,6 +58,44 @@ if evolink_api_key:
     print(f"已初始化 Evolink Provider (base_url={evolink_base_url})")
 else:
     print("警告：未配置 Evolink API Key，Evolink Provider 不可用。")
+
+# ==================== MultiProvider 初始化（从 YAML） ====================
+
+if model_config.get("multi"):
+    _multi_cfg = model_config["multi"]
+    _text_cfg = _multi_cfg.get("text", {})
+    _image_cfg = _multi_cfg.get("image", {})
+    if _text_cfg.get("api_key") and _image_cfg.get("api_key"):
+        from providers.multi import MultiProvider
+        multi_provider = MultiProvider(
+            text_api_style=_text_cfg.get("api_style", "openai"),
+            text_api_key=_text_cfg["api_key"],
+            text_base_url=_text_cfg.get("base_url", ""),
+            image_api_style=_image_cfg.get("api_style", "gemini"),
+            image_api_key=_image_cfg["api_key"],
+            image_base_url=_image_cfg.get("base_url", ""),
+        )
+        print(f"已初始化 MultiProvider (text={_text_cfg.get('api_style')}, image={_image_cfg.get('api_style')})")
+
+
+def init_multi_provider(
+    text_api_style: str, text_api_key: str, text_base_url: str,
+    image_api_style: str, image_api_key: str, image_base_url: str,
+):
+    """用指定参数初始化或更新 MultiProvider（供界面动态传入）。"""
+    global multi_provider
+    if not text_api_key or not image_api_key:
+        return
+    from providers.multi import MultiProvider
+    multi_provider = MultiProvider(
+        text_api_style=text_api_style,
+        text_api_key=text_api_key,
+        text_base_url=text_base_url,
+        image_api_style=image_api_style,
+        image_api_key=image_api_key,
+        image_base_url=image_base_url,
+    )
+    print(f"已通过界面初始化 MultiProvider (text={text_api_style}, image={image_api_style})")
 
 
 def init_evolink_provider(api_key: str, base_url: str = ""):
@@ -81,6 +120,52 @@ def init_gemini_client(api_key: str):
         print("已通过界面初始化 Gemini Client")
     except ImportError:
         print("警告：未安装 google-genai，Gemini Client 不可用。请运行 pip install google-genai")
+
+
+async def test_evolink_connection(api_key: str, model_name: str, base_url: str = "") -> str:
+    """测试 Evolink Provider 文本连通性，返回成功/失败消息。"""
+    try:
+        from providers.evolink import EvolinkProvider
+        url = base_url or evolink_base_url
+        p = EvolinkProvider(api_key=api_key, base_url=url)
+        result = await p.generate_text(
+            model_name=model_name,
+            contents=[{"type": "text", "text": "Say 'hello' in one word."}],
+            system_prompt="",
+            temperature=0,
+            max_output_tokens=32,
+            max_attempts=1,
+            retry_delay=0,
+        )
+        await p.close()
+        text = result[0] if result else ""
+        if text and text != "Error":
+            return text[:80]
+        return "Error: 未返回有效文本"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+async def test_gemini_connection(api_key: str, model_name: str) -> str:
+    """测试 Gemini Client 文本连通性，返回成功/失败消息。"""
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model_name,
+            contents="Say 'hello' in one word.",
+            config=types.GenerateContentConfig(
+                temperature=0,
+                max_output_tokens=32,
+            ),
+        )
+        text = response.text if response and response.text else ""
+        if text:
+            return text[:80]
+        return "Error: 未返回有效文本"
+    except Exception as e:
+        return f"Error: {e}"
 
 
 # ==================== 原始 Provider 初始化（保留兼容性） ====================
@@ -134,9 +219,10 @@ async def call_evolink_text_with_retry_async(
         retry_delay: 重试间隔
         error_context: 错误上下文
     """
-    print(f"[DEBUG] call_evolink_text: model={model_name}, provider={'已初始化' if evolink_provider else '未初始化'}")
-    if evolink_provider is None:
-        raise RuntimeError("Evolink Provider 未初始化，请检查 EVOLINK_API_KEY 配置。")
+    print(f"[DEBUG] call_evolink_text: model={model_name}, provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}")
+    provider = multi_provider or evolink_provider
+    if provider is None:
+        raise RuntimeError("Evolink/Multi Provider 未初始化，请检查 API Key 配置。")
 
     # 从 config 中提取参数（兼容 types.GenerateContentConfig 和 dict）
     if hasattr(config, 'system_instruction'):
@@ -155,7 +241,7 @@ async def call_evolink_text_with_retry_async(
         max_output_tokens = 50000
         print(f"[DEBUG] call_evolink_text: 使用默认参数, config type={type(config)}")
 
-    return await evolink_provider.generate_text(
+    return await provider.generate_text(
         model_name=model_name,
         contents=contents,
         system_prompt=system_prompt,
@@ -196,15 +282,16 @@ async def call_evolink_image_with_retry_async(
         retry_delay: 重试间隔
         error_context: 错误上下文
     """
-    print(f"[DEBUG] call_evolink_image: model={model_name}, config={config}, provider={'已初始化' if evolink_provider else '未初始化'}")
-    if evolink_provider is None:
-        raise RuntimeError("Evolink Provider 未初始化，请检查 EVOLINK_API_KEY 配置。")
+    print(f"[DEBUG] call_evolink_image: model={model_name}, config={config}, provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}")
+    provider = multi_provider or evolink_provider
+    if provider is None:
+        raise RuntimeError("Evolink/Multi Provider 未初始化，请检查 API Key 配置。")
 
     aspect_ratio = config.get("aspect_ratio", "16:9")
     quality = config.get("quality", "2K")
     image_urls = config.get("image_urls", None)
 
-    return await evolink_provider.generate_image(
+    return await provider.generate_image(
         model_name=model_name,
         prompt=prompt,
         aspect_ratio=aspect_ratio,

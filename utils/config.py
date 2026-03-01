@@ -36,14 +36,15 @@ class ExpConfig:
     max_critic_rounds: int = 3
     model_name: str = ""
     image_model_name: str = ""
-    provider: str = "evolink"
+    provider: str = "evolink"  # "evolink", "gemini", or "multi"
     work_dir: Path = Path(__file__).parent.parent
 
     timestamp: str | None = None
 
     def __post_init__(self):
         os.environ["TZ"] = "America/Los_Angeles" # set the timezone as you like
-        time.tzset()  # Only needed once after setting TZ
+        if hasattr(time, "tzset"):
+            time.tzset()  # Only needed once after setting TZ (not available on Windows)
         
         # Fallback to yaml config if no model_name provided
         if not self.model_name or not self.image_model_name:
