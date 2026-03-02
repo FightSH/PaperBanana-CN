@@ -26,7 +26,7 @@ from utils import generation_utils, image_utils
 from .base_agent import BaseAgent
 
 
-def _execute_plot_code_worker(code_text: str) -> str:
+def _execute_plot_code_worker(code_text: str, log_prefix: str = "") -> str:
     """
     Independent plot code execution worker:
     1. Extract code
@@ -55,7 +55,8 @@ def _execute_plot_code_worker(code_text: str) -> str:
             return None
 
     except Exception as e:
-        print(f"Error executing plot code: {e}")
+        prefix = f"{log_prefix} " if log_prefix else ""
+        print(f"Error executing plot code {prefix}: {e}")
         return None
 
 
@@ -94,7 +95,12 @@ class VisualizerAgent(BaseAgent):
     async def process(self, data: Dict[str, Any]) -> Dict[str, Any]:
         cfg = self.task_config
         task_name = cfg["task_name"]
-        print(f"[DEBUG] [VisualizerAgent] 开始处理, task={task_name}, provider={self.exp_config.provider}, model={self.model_name}, 图像生成={cfg['use_image_generation']}")
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
+        print(
+            f"[DEBUG] [VisualizerAgent] {log_prefix} 开始处理, task={task_name}, "
+            f"provider={self.exp_config.provider}, model={self.model_name}, 图像生成={cfg['use_image_generation']}"
+        )
 
         desc_keys_to_process = []
         for key in [
@@ -114,7 +120,9 @@ class VisualizerAgent(BaseAgent):
                     prev_base64_key = f"target_{task_name}_critic_desc{round_idx - 1}_base64_jpg"
                     if prev_base64_key in data:
                         data[f"{key}_base64_jpg"] = data[prev_base64_key]
-                        print(f"[Visualizer] Reused base64 from round {round_idx - 1} for {key}")
+                        print(
+                            f"[Visualizer] {log_prefix} Reused base64 from round {round_idx - 1} for {key}"
+                        )
                         continue
 
                 desc_keys_to_process.append(key)
@@ -122,7 +130,7 @@ class VisualizerAgent(BaseAgent):
         if not cfg["use_image_generation"]:
             loop = asyncio.get_running_loop()
 
-        print(f"[DEBUG] [VisualizerAgent] 待处理 desc_keys: {desc_keys_to_process}")
+        print(f"[DEBUG] [VisualizerAgent] {log_prefix} 待处理 desc_keys: {desc_keys_to_process}")
         image_max_attempts = self.exp_config.image_max_attempts
         image_retry_delay = self.exp_config.image_retry_delay
         image_poll_interval = self.exp_config.image_poll_interval
@@ -132,7 +140,10 @@ class VisualizerAgent(BaseAgent):
         for desc_key in desc_keys_to_process:
             prompt_text = cfg["prompt_template"].format(desc=data[desc_key])
             content_list = [{"type": "text", "text": prompt_text}]
-            print(f"[DEBUG] [VisualizerAgent] 处理 {desc_key}, prompt 长度={len(prompt_text)}")
+            step_context = f"candidate={candidate_id}, desc_key={desc_key}"
+            print(
+                f"[DEBUG] [VisualizerAgent] {log_prefix} 处理 {desc_key}, prompt 长度={len(prompt_text)}"
+            )
 
             # 根据 provider 路由 API 调用
             if self.exp_config.provider in ("evolink", "multi"):
@@ -152,6 +163,7 @@ class VisualizerAgent(BaseAgent):
                         },
                         max_attempts=image_max_attempts,
                         retry_delay=image_retry_delay,
+                        error_context=step_context,
                     )
                 else:
                     # Evolink/Multi 文本生成（用于代码生成）
@@ -165,6 +177,7 @@ class VisualizerAgent(BaseAgent):
                         },
                         max_attempts=text_max_attempts,
                         retry_delay=text_retry_delay,
+                        error_context=step_context,
                     )
             elif "gemini" in self.model_name:
                 from google.genai import types
@@ -189,6 +202,7 @@ class VisualizerAgent(BaseAgent):
                     config=types.GenerateContentConfig(**gen_config_args),
                     max_attempts=image_max_attempts if cfg["use_image_generation"] else text_max_attempts,
                     retry_delay=image_retry_delay if cfg["use_image_generation"] else text_retry_delay,
+                    error_context=step_context,
                 )
             elif "gpt-image" in self.model_name:
                 image_config = {
@@ -203,14 +217,18 @@ class VisualizerAgent(BaseAgent):
                     config=image_config,
                     max_attempts=image_max_attempts,
                     retry_delay=image_retry_delay,
+                    error_context=step_context,
                 )
             else:
                 raise ValueError(f"Unsupported model: {self.model_name}")
 
             if not response_list or not response_list[0]:
-                raise RuntimeError(f"[VisualizerAgent] {desc_key}: API 返回空响应")
+                raise RuntimeError(f"[VisualizerAgent] {log_prefix} {desc_key}: API 返回空响应")
 
-            print(f"[DEBUG] [VisualizerAgent] {desc_key}: API 响应长度={len(response_list[0])}, 值前20字={response_list[0][:20]}...")
+            print(
+                f"[DEBUG] [VisualizerAgent] {log_prefix} {desc_key}: API 响应长度={len(response_list[0])}, "
+                f"值前20字={response_list[0][:20]}..."
+            )
 
             # Post-process based on task type
             if cfg["use_image_generation"]:
@@ -219,9 +237,12 @@ class VisualizerAgent(BaseAgent):
                 )
                 if converted_jpg:
                     data[f"{desc_key}_base64_jpg"] = converted_jpg
-                    print(f"[DEBUG] [VisualizerAgent] ✓ {desc_key}_base64_jpg 已生成, 大小={len(converted_jpg)}")
+                    print(
+                        f"[DEBUG] [VisualizerAgent] {log_prefix} ✓ {desc_key}_base64_jpg 已生成, "
+                        f"大小={len(converted_jpg)}"
+                    )
                 else:
-                    raise RuntimeError(f"[VisualizerAgent] {desc_key}: 图像转换失败")
+                    raise RuntimeError(f"[VisualizerAgent] {log_prefix} {desc_key}: 图像转换失败")
             else:
                 raw_code = response_list[0]
 
@@ -229,7 +250,7 @@ class VisualizerAgent(BaseAgent):
                     self.process_executor = ProcessPoolExecutor(max_workers=4)
 
                 base64_jpg = await loop.run_in_executor(
-                    self.process_executor, _execute_plot_code_worker, raw_code
+                    self.process_executor, _execute_plot_code_worker, raw_code, log_prefix
                 )
                 data[f"{desc_key}_code"] = raw_code
 

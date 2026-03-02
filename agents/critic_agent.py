@@ -51,9 +51,17 @@ class CriticAgent(BaseAgent):
     async def process(self, data: Dict[str, Any], source: str = "stylist") -> Dict[str, Any]:
         cfg = self.task_config
         task_name = cfg["task_name"]
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
 
         round_idx = data.get("current_critic_round", 0)
-        print(f"[DEBUG] [CriticAgent] 开始处理, round={round_idx}, source={source}, provider={self.exp_config.provider}")
+        step_context = (
+            f"candidate={candidate_id}, stage=critic, round={round_idx}, source={source}, task={task_name}"
+        )
+        print(
+            f"[DEBUG] [CriticAgent] {log_prefix} 开始处理, round={round_idx}, "
+            f"source={source}, provider={self.exp_config.provider}"
+        )
 
         if round_idx == 0:
             if source == "stylist":
@@ -89,7 +97,10 @@ class CriticAgent(BaseAgent):
                 },
             })
         else:
-            print(f"⚠️ [Critic] No valid image found for round {round_idx}. Using text-only critique mode.")
+            print(
+                f"⚠️ [Critic] {log_prefix} round={round_idx} 无有效图像，"
+                "使用 text-only critique 模式。"
+            )
             content_list.append({
                 "type": "text",
                 "text": "\n[SYSTEM NOTICE] The plot image could not be generated based on the current description (likely due to invalid code). Please check the description for errors (e.g., syntax issues, missing data) and provide a revised version."
@@ -112,6 +123,7 @@ class CriticAgent(BaseAgent):
                 },
                 max_attempts=5,
                 retry_delay=5,
+                error_context=step_context,
             )
         else:
             from google.genai import types
@@ -126,6 +138,7 @@ class CriticAgent(BaseAgent):
                 ),
                 max_attempts=5,
                 retry_delay=5,
+                error_context=step_context,
             )
 
         cleaned_response = (
@@ -137,7 +150,10 @@ class CriticAgent(BaseAgent):
                 eval_result = {}
         except Exception as e:
             eval_result = {}
-            print(e, cleaned_response)
+            print(
+                f"[WARN] [CriticAgent] {log_prefix} JSON 解析失败: {e}; "
+                f"response 前200字={cleaned_response[:200]}"
+            )
 
         critic_suggestions = eval_result.get("critic_suggestions", "No changes needed.")
         revised_description = eval_result.get("revised_description", "No changes needed.")
@@ -147,9 +163,12 @@ class CriticAgent(BaseAgent):
 
         if revised_description.strip() == "No changes needed.":
             data[f"target_{task_name}_critic_desc{round_idx}"] = detailed_description
-            print(f"[DEBUG] [CriticAgent] round={round_idx}: 无需修改")
+            print(f"[DEBUG] [CriticAgent] {log_prefix} round={round_idx}: 无需修改")
         else:
-            print(f"[DEBUG] [CriticAgent] round={round_idx}: 建议长度={len(critic_suggestions)}, 修订描述长度={len(revised_description)}")
+            print(
+                f"[DEBUG] [CriticAgent] {log_prefix} round={round_idx}: 建议长度={len(critic_suggestions)}, "
+                f"修订描述长度={len(revised_description)}"
+            )
 
         return data
 

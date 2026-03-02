@@ -35,6 +35,7 @@ def make_provider(
     image_api_style="gemini",
     image_api_key="image-key",
     image_base_url="https://image-api.example.com",
+    image_openai_endpoint="auto",
 ):
     return MultiProvider(
         text_api_style=text_api_style,
@@ -43,6 +44,7 @@ def make_provider(
         image_api_style=image_api_style,
         image_api_key=image_api_key,
         image_base_url=image_base_url,
+        image_openai_endpoint=image_openai_endpoint,
     )
 
 
@@ -62,6 +64,11 @@ class TestMultiProviderInit:
         assert p.image_api_style == "gemini"
         assert p.image_api_key == "image-key"
         assert p.image_base_url == "https://image-api.example.com"
+        assert p.image_openai_endpoint == "auto"
+
+    def test_init_openai_endpoint_mode(self):
+        p = make_provider(image_openai_endpoint="images")
+        assert p.image_openai_endpoint == "images"
 
     def test_init_strips_trailing_slash(self):
         p = MultiProvider(
@@ -520,6 +527,47 @@ class TestImageGeneration:
         assert call_count == 2
         assert result[0] == img_b64
 
+    def test_image_via_openai_chat_mode_only(self):
+        """openai_endpoint=chat 时只调用 chat/completions，不回退 images/generations"""
+        p = make_provider(image_api_style="openai", image_openai_endpoint="chat")
+
+        captured_urls = []
+        async def mock_post(url, payload, headers, **kwargs):
+            captured_urls.append(url)
+            return {"choices": [{"message": {"content": "text-only"}}]}
+
+        with patch.object(p, '_post_json', side_effect=mock_post):
+            result = run(p.generate_image(
+                model_name="test-image-model",
+                prompt="A cat",
+                max_attempts=1,
+                retry_delay=0,
+            ))
+        assert result == ["Error"]
+        assert len(captured_urls) == 1
+        assert "chat/completions" in captured_urls[0]
+
+    def test_image_via_openai_images_mode_only(self):
+        """openai_endpoint=images 时直接调用 images/generations，不调用 chat/completions"""
+        p = make_provider(image_api_style="openai", image_openai_endpoint="images")
+        img_b64 = make_png_base64()
+
+        captured_urls = []
+        async def mock_post(url, payload, headers, **kwargs):
+            captured_urls.append(url)
+            return {"data": [{"b64_json": img_b64}]}
+
+        with patch.object(p, '_post_json', side_effect=mock_post):
+            result = run(p.generate_image(
+                model_name="test-image-model",
+                prompt="A cat",
+                max_attempts=1,
+                retry_delay=0,
+            ))
+        assert result[0] == img_b64
+        assert len(captured_urls) == 1
+        assert "images/generations" in captured_urls[0]
+
     def test_image_via_openai_remote_url_download(self):
         """OpenAI 返回远程 URL，需要下载"""
         p = make_provider(image_api_style="openai")
@@ -646,10 +694,12 @@ class TestGenerationUtilsMulti:
             image_api_style="gemini",
             image_api_key="image-key",
             image_base_url="https://image.example.com",
+            image_openai_endpoint="images",
         )
         assert generation_utils.multi_provider is not None
         assert generation_utils.multi_provider.text_api_style == "openai"
         assert generation_utils.multi_provider.image_api_style == "gemini"
+        assert generation_utils.multi_provider.image_openai_endpoint == "images"
         # 清理
         generation_utils.multi_provider = None
 

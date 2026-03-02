@@ -26,7 +26,7 @@ from utils import generation_utils, image_utils
 from .base_agent import BaseAgent
 
 
-def _execute_plot_code_worker(code_text: str) -> str:
+def _execute_plot_code_worker(code_text: str, log_prefix: str = "") -> str:
     """
     Independent plot code execution worker:
     1. Extract code
@@ -61,7 +61,8 @@ def _execute_plot_code_worker(code_text: str) -> str:
             return None
 
     except Exception as e:
-        print(f"Error executing plot code: {e}")
+        prefix = f"{log_prefix} " if log_prefix else ""
+        print(f"Error executing plot code {prefix}: {e}")
         return None
 
 
@@ -98,6 +99,13 @@ class VanillaAgent(BaseAgent):
 
     async def process(self, data: Dict[str, Any]) -> Dict[str, Any]:
         cfg = self.task_config
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
+        step_context = f"candidate={candidate_id}, stage=vanilla, task={cfg['task_name']}"
+        print(
+            f"[DEBUG] [VanillaAgent] {log_prefix} 开始处理, task={cfg['task_name']}, "
+            f"provider={self.exp_config.provider}, model={self.model_name}, 图像生成={cfg['use_image_generation']}"
+        )
 
         raw_content = data["content"]
         content = json.dumps(raw_content) if isinstance(raw_content, (dict, list)) else raw_content
@@ -128,6 +136,7 @@ class VanillaAgent(BaseAgent):
                     },
                     max_attempts=self.exp_config.image_max_attempts,
                     retry_delay=self.exp_config.image_retry_delay,
+                    error_context=step_context,
                 )
             else:
                 response_list = await generation_utils.call_evolink_text_with_retry_async(
@@ -140,6 +149,7 @@ class VanillaAgent(BaseAgent):
                     },
                     max_attempts=5,
                     retry_delay=30,
+                    error_context=step_context,
                 )
         elif "gemini" in self.model_name:
             from google.genai import types
@@ -161,6 +171,7 @@ class VanillaAgent(BaseAgent):
                 config=types.GenerateContentConfig(**gen_config_args),
                 max_attempts=self.exp_config.image_max_attempts if cfg["use_image_generation"] else 5,
                 retry_delay=self.exp_config.image_retry_delay if cfg["use_image_generation"] else 30,
+                error_context=step_context,
             )
         elif "gpt-image" in self.model_name:
             image_config = {
@@ -175,6 +186,7 @@ class VanillaAgent(BaseAgent):
                 config=image_config,
                 max_attempts=self.exp_config.image_max_attempts,
                 retry_delay=self.exp_config.image_retry_delay,
+                error_context=step_context,
             )
         else:
             raise ValueError(f"Unsupported model: {self.model_name}")
@@ -182,20 +194,21 @@ class VanillaAgent(BaseAgent):
         output_key = f"vanilla_{cfg['task_name']}_base64_jpg"
         if cfg["use_image_generation"]:
             if not response_list or not response_list[0]:
-                raise RuntimeError("[VanillaAgent] 图像生成返回空响应")
+                raise RuntimeError(f"[VanillaAgent] {log_prefix} 图像生成返回空响应")
             converted_jpg = await asyncio.to_thread(image_utils.convert_png_b64_to_jpg_b64, response_list[0])
             if not converted_jpg:
-                raise RuntimeError("[VanillaAgent] 图像转换失败")
+                raise RuntimeError(f"[VanillaAgent] {log_prefix} 图像转换失败")
             data[output_key] = converted_jpg
         else:
             if response_list and response_list[0]:
                 raw_code = response_list[0]
                 loop = asyncio.get_running_loop()
                 base64_jpg = await loop.run_in_executor(
-                    self.process_executor, _execute_plot_code_worker, raw_code
+                    self.process_executor, _execute_plot_code_worker, raw_code, log_prefix
                 )
                 if base64_jpg:
                     data[output_key] = base64_jpg
+        print(f"[DEBUG] [VanillaAgent] {log_prefix} 完成, output_key={output_key}, has_output={bool(data.get(output_key))}")
 
         return data
 

@@ -58,46 +58,70 @@ class RetrieverAgent(BaseAgent):
 
     async def process(self, data: Dict[str, Any], retrieval_setting: str = "auto") -> Dict[str, Any]:
         cfg = self.task_config
-        print(f"[DEBUG] [RetrieverAgent] 开始处理, setting={retrieval_setting}, task={cfg['task_name']}, provider={self.exp_config.provider}")
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
+        print(
+            f"[DEBUG] [RetrieverAgent] {log_prefix} 开始处理, setting={retrieval_setting}, "
+            f"task={cfg['task_name']}, provider={self.exp_config.provider}"
+        )
 
         import os
         ref_file = self.exp_config.work_dir / f"data/PaperBananaBench/{cfg['task_name']}/ref.json"
 
         if retrieval_setting in ["auto", "auto-full", "random"] and not ref_file.exists():
-            print(f"Warning: Reference file not found at {ref_file}. Falling back to retrieval_setting='none'.")
+            print(
+                f"Warning: [RetrieverAgent] {log_prefix} Reference file not found at {ref_file}. "
+                "Falling back to retrieval_setting='none'."
+            )
             retrieval_setting = "none"
 
         if retrieval_setting == "manual":
             manual_file = self.exp_config.work_dir / f"data/PaperBananaBench/{cfg['task_name']}/agent_selected_12.json"
             if not manual_file.exists():
-                print(f"Warning: Manual reference file not found at {manual_file}. Falling back to retrieval_setting='none'.")
+                print(
+                    f"Warning: [RetrieverAgent] {log_prefix} Manual reference file not found at {manual_file}. "
+                    "Falling back to retrieval_setting='none'."
+                )
                 retrieval_setting = "none"
 
         if retrieval_setting == "none":
             data["top10_references"] = []
             data["retrieved_examples"] = []
-            print(f"[DEBUG] [RetrieverAgent] 跳过检索 (setting=none)")
+            print(f"[DEBUG] [RetrieverAgent] {log_prefix} 跳过检索 (setting=none)")
 
         elif retrieval_setting == "manual":
             ids, examples = self._load_manual_references(cfg)
             data["top10_references"] = ids
             data["retrieved_examples"] = examples
-            print(f"[DEBUG] [RetrieverAgent] 手动检索完成, {len(ids)} 个参考")
+            print(f"[DEBUG] [RetrieverAgent] {log_prefix} 手动检索完成, {len(ids)} 个参考")
 
         elif retrieval_setting == "random":
             data["top10_references"] = self._load_random_references(cfg)
             data["retrieved_examples"] = []
-            print(f"[DEBUG] [RetrieverAgent] 随机检索完成, {len(data['top10_references'])} 个参考")
+            print(
+                f"[DEBUG] [RetrieverAgent] {log_prefix} 随机检索完成, "
+                f"{len(data['top10_references'])} 个参考"
+            )
 
         elif retrieval_setting == "auto":
-            data["top10_references"] = await self._retrieve_and_parse(data, cfg, lite=True)
+            data["top10_references"] = await self._retrieve_and_parse(
+                data, cfg, lite=True, candidate_id=candidate_id
+            )
             data["retrieved_examples"] = []
-            print(f"[DEBUG] [RetrieverAgent] 自动检索完成 (lite), {len(data['top10_references'])} 个参考: {data['top10_references']}")
+            print(
+                f"[DEBUG] [RetrieverAgent] {log_prefix} 自动检索完成 (lite), "
+                f"{len(data['top10_references'])} 个参考: {data['top10_references']}"
+            )
 
         elif retrieval_setting == "auto-full":
-            data["top10_references"] = await self._retrieve_and_parse(data, cfg, lite=False)
+            data["top10_references"] = await self._retrieve_and_parse(
+                data, cfg, lite=False, candidate_id=candidate_id
+            )
             data["retrieved_examples"] = []
-            print(f"[DEBUG] [RetrieverAgent] 自动检索完成 (full), {len(data['top10_references'])} 个参考: {data['top10_references']}")
+            print(
+                f"[DEBUG] [RetrieverAgent] {log_prefix} 自动检索完成 (full), "
+                f"{len(data['top10_references'])} 个参考: {data['top10_references']}"
+            )
         else:
             raise ValueError(f"Unknown retrieval_setting: {retrieval_setting}")
 
@@ -123,7 +147,9 @@ class RetrieverAgent(BaseAgent):
         sample_size = min(10, len(id_list))
         return random.sample(id_list, sample_size) if sample_size > 0 else []
 
-    async def _retrieve_and_parse(self, data: Dict[str, Any], cfg: dict, lite: bool = True) -> list:
+    async def _retrieve_and_parse(
+        self, data: Dict[str, Any], cfg: dict, lite: bool = True, candidate_id: Any = "N/A"
+    ) -> list:
         """
         通过 LLM 智能检索最相关的参考示例。
 
@@ -153,7 +179,12 @@ class RetrieverAgent(BaseAgent):
         content_list = [{"type": "text", "text": user_prompt}]
 
         prompt_chars = len(user_prompt)
-        print(f"[DEBUG] [RetrieverAgent] auto 检索 prompt: {prompt_chars:,} 字符 (~{prompt_chars//4:,} tokens), lite={lite}")
+        log_prefix = f"[candidate={candidate_id}]"
+        step_context = f"candidate={candidate_id}, stage=retriever, lite={lite}, task={cfg['task_name']}"
+        print(
+            f"[DEBUG] [RetrieverAgent] {log_prefix} auto 检索 prompt: {prompt_chars:,} 字符 "
+            f"(~{prompt_chars//4:,} tokens), lite={lite}"
+        )
 
         # 根据 provider 路由 API 调用
         if self.exp_config.provider in ("evolink", "multi"):
@@ -167,6 +198,7 @@ class RetrieverAgent(BaseAgent):
                 },
                 max_attempts=3,
                 retry_delay=30,
+                error_context=step_context,
             )
         else:
             from google.genai import types
@@ -181,12 +213,13 @@ class RetrieverAgent(BaseAgent):
                 ),
                 max_attempts=3,
                 retry_delay=30,
+                error_context=step_context,
             )
 
         raw_response = response_list[0].strip()
-        return self._parse_retrieval_result(raw_response, cfg["task_name"])
+        return self._parse_retrieval_result(raw_response, cfg["task_name"], log_prefix=log_prefix)
 
-    def _parse_retrieval_result(self, raw_response: str, task_name: str) -> list:
+    def _parse_retrieval_result(self, raw_response: str, task_name: str, log_prefix: str = "") -> list:
         import json_repair
 
         try:
@@ -199,8 +232,9 @@ class RetrieverAgent(BaseAgent):
             else:
                 raise ValueError(f"Unknown task_name: {task_name}")
         except Exception as e:
-            print(f"Warning: Failed to parse retrieval result: {e}")
-            print(f"Raw response: {raw_response[:200]}...")
+            prefix = f"{log_prefix} " if log_prefix else ""
+            print(f"Warning: [RetrieverAgent] {prefix}Failed to parse retrieval result: {e}")
+            print(f"[RetrieverAgent] {prefix}Raw response: {raw_response[:200]}...")
             return []
 
 

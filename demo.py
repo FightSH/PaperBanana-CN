@@ -156,6 +156,7 @@ async def process_parallel_candidates(
                 image_api_style=multi_config["image_api_style"],
                 image_api_key=multi_config["image_api_key"],
                 image_base_url=multi_config["image_base_url"],
+                image_openai_endpoint=multi_config.get("image_openai_endpoint", "auto"),
             )
         else:
             print("[DEBUG] ⚠️ provider=multi 但未提供 multi_config，MultiProvider 可能无法正常工作")
@@ -648,6 +649,19 @@ def main():
                     key="tab1_multi_image_style",
                     help="openai: OpenAI 兼容接口 | gemini: Google Gemini 原生接口"
                 )
+                _openai_endpoint_default = _multi_image_cfg.get("openai_endpoint", "auto")
+                if _openai_endpoint_default not in ("auto", "chat", "images"):
+                    _openai_endpoint_default = "auto"
+                if image_api_style == "openai":
+                    openai_endpoint_mode = st.selectbox(
+                        "OpenAI 生图端点",
+                        ["auto", "chat", "images"],
+                        index=["auto", "chat", "images"].index(_openai_endpoint_default),
+                        key="tab1_multi_image_openai_endpoint",
+                        help="auto: 先走 chat/completions，失败再走 images/generations；chat/images: 强制指定单一路径"
+                    )
+                else:
+                    openai_endpoint_mode = st.session_state.get("tab1_multi_image_openai_endpoint", _openai_endpoint_default)
                 image_api_key = st.text_input(
                     "图像 API Key",
                     type="password",
@@ -725,6 +739,7 @@ def main():
                                     text_api_style="openai", text_api_key="placeholder",
                                     text_base_url="https://placeholder",
                                     image_api_style=_is, image_api_key=_ik, image_base_url=_iu,
+                                    image_openai_endpoint=st.session_state.get("tab1_multi_image_openai_endpoint", "auto"),
                                 )
                                 _res = asyncio.run(_ip.test_image_connection(image_model_name))
                             if _res.startswith("Error"):
@@ -880,6 +895,7 @@ The framework extends to statistical plots by adjusting the Visualizer and Criti
                             "image_api_style": st.session_state.get("tab1_multi_image_style", "gemini"),
                             "image_api_key": st.session_state.get("tab1_multi_image_key", ""),
                             "image_base_url": st.session_state.get("tab1_multi_image_url", ""),
+                            "image_openai_endpoint": st.session_state.get("tab1_multi_image_openai_endpoint", "auto"),
                         }
 
                     # 并行处理

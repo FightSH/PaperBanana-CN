@@ -41,3 +41,4 @@ api_keys:
 #     api_style: "gemini"          # "openai" or "gemini"
 #     api_key: ""
 #     base_url: ""                 # e.g. https://generativelanguage.googleapis.com
+#     openai_endpoint: "auto"      # when api_style=openai: "auto" | "chat" | "images"

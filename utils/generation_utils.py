@@ -74,6 +74,7 @@ if model_config.get("multi"):
             image_api_style=_image_cfg.get("api_style", "gemini"),
             image_api_key=_image_cfg["api_key"],
             image_base_url=_image_cfg.get("base_url", ""),
+            image_openai_endpoint=_image_cfg.get("openai_endpoint", "auto"),
         )
         print(f"已初始化 MultiProvider (text={_text_cfg.get('api_style')}, image={_image_cfg.get('api_style')})")
 
@@ -81,6 +82,7 @@ if model_config.get("multi"):
 def init_multi_provider(
     text_api_style: str, text_api_key: str, text_base_url: str,
     image_api_style: str, image_api_key: str, image_base_url: str,
+    image_openai_endpoint: str = "auto",
 ):
     """用指定参数初始化或更新 MultiProvider（供界面动态传入）。"""
     global multi_provider
@@ -94,8 +96,12 @@ def init_multi_provider(
         image_api_style=image_api_style,
         image_api_key=image_api_key,
         image_base_url=image_base_url,
+        image_openai_endpoint=image_openai_endpoint,
     )
-    print(f"已通过界面初始化 MultiProvider (text={text_api_style}, image={image_api_style})")
+    print(
+        f"已通过界面初始化 MultiProvider (text={text_api_style}, image={image_api_style}, "
+        f"image_openai_endpoint={image_openai_endpoint})"
+    )
 
 
 def init_evolink_provider(api_key: str, base_url: str = ""):
@@ -219,7 +225,11 @@ async def call_evolink_text_with_retry_async(
         retry_delay: 重试间隔
         error_context: 错误上下文
     """
-    print(f"[DEBUG] call_evolink_text: model={model_name}, provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}")
+    ctx = f", error_context={error_context}" if error_context else ""
+    print(
+        f"[DEBUG] call_evolink_text: model={model_name}, "
+        f"provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}{ctx}"
+    )
     provider = multi_provider or evolink_provider
     if provider is None:
         raise RuntimeError("Evolink/Multi Provider 未初始化，请检查 API Key 配置。")
@@ -229,17 +239,17 @@ async def call_evolink_text_with_retry_async(
         system_prompt = config.system_instruction or ""
         temperature = config.temperature
         max_output_tokens = config.max_output_tokens
-        print(f"[DEBUG] call_evolink_text: 从 GenerateContentConfig 提取参数")
+        print(f"[DEBUG] call_evolink_text: 从 GenerateContentConfig 提取参数{ctx}")
     elif isinstance(config, dict):
         system_prompt = config.get("system_prompt", "")
         temperature = config.get("temperature", 1.0)
         max_output_tokens = config.get("max_output_tokens", 50000)
-        print(f"[DEBUG] call_evolink_text: 从 dict 提取参数")
+        print(f"[DEBUG] call_evolink_text: 从 dict 提取参数{ctx}")
     else:
         system_prompt = ""
         temperature = 1.0
         max_output_tokens = 50000
-        print(f"[DEBUG] call_evolink_text: 使用默认参数, config type={type(config)}")
+        print(f"[DEBUG] call_evolink_text: 使用默认参数{ctx}, config type={type(config)}")
 
     return await provider.generate_text(
         model_name=model_name,
@@ -282,7 +292,11 @@ async def call_evolink_image_with_retry_async(
         retry_delay: 重试间隔
         error_context: 错误上下文
     """
-    print(f"[DEBUG] call_evolink_image: model={model_name}, config={config}, provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}")
+    ctx = f", error_context={error_context}" if error_context else ""
+    print(
+        f"[DEBUG] call_evolink_image: model={model_name}, config={config}, "
+        f"provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}{ctx}"
+    )
     provider = multi_provider or evolink_provider
     if provider is None:
         raise RuntimeError("Evolink/Multi Provider 未初始化，请检查 API Key 配置。")

@@ -32,6 +32,8 @@ class MultiProvider(BaseProvider):
       - api_style: "openai" 或 "gemini"
       - api_key: 对应的 API 密钥
       - base_url: API 基础地址
+      - image_openai_endpoint: 当 image api_style=openai 时，
+        选择 "chat" / "images" / "auto" 路由策略
     """
 
     def __init__(
@@ -42,6 +44,7 @@ class MultiProvider(BaseProvider):
         image_api_style: str,
         image_api_key: str,
         image_base_url: str,
+        image_openai_endpoint: str = "auto",
     ):
         self.text_api_style = text_api_style.lower().strip()
         self.text_api_key = text_api_key
@@ -50,6 +53,11 @@ class MultiProvider(BaseProvider):
         self.image_api_style = image_api_style.lower().strip()
         self.image_api_key = image_api_key
         self.image_base_url = image_base_url.rstrip("/")
+        endpoint_mode = str(image_openai_endpoint or "auto").lower().strip()
+        if endpoint_mode not in ("auto", "chat", "images"):
+            print(f"[MultiProvider] 未知 image_openai_endpoint={image_openai_endpoint}，回退为 auto")
+            endpoint_mode = "auto"
+        self.image_openai_endpoint = endpoint_mode
 
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -733,26 +741,30 @@ class MultiProvider(BaseProvider):
         style = self.image_api_style
         api_key = self.image_api_key
         base_url = self.image_base_url
+        ctx = f" ({error_context})" if error_context else ""
 
-        print(f"[Multi 图像] style={style}, model={model_name}, base_url={base_url}")
+        print(
+            f"[Multi 图像] style={style}, model={model_name}, base_url={base_url}, "
+            f"openai_endpoint={self.image_openai_endpoint}{ctx}"
+        )
 
         for attempt in range(max_attempts):
             try:
                 if style == "openai":
                     b64 = await self._image_via_openai(
                         model_name, prompt, aspect_ratio, quality,
-                        api_key, base_url,
+                        api_key, base_url, error_context=error_context,
                     )
                 else:
                     b64 = await self._image_via_gemini(
                         model_name, prompt, aspect_ratio, quality,
-                        api_key, base_url,
+                        api_key, base_url, error_context=error_context,
                     )
 
                 if b64 and b64 != "Error":
                     return [b64]
 
-                print(f"[Multi 图像] 未获取图像，{retry_delay}s 后重试...")
+                print(f"[Multi 图像] 未获取图像{ctx}，{retry_delay}s 后重试...")
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(retry_delay)
 
@@ -774,32 +786,71 @@ class MultiProvider(BaseProvider):
 
     async def _image_via_openai(
         self, model_name, prompt, aspect_ratio, quality,
-        api_key, base_url,
+        api_key, base_url, error_context: str = "",
     ) -> Optional[str]:
         """
         OpenAI 兼容图像生成。
-        优先尝试 chat/completions（适用于多模态生成模型），
-        如果返回无图则回退到 images/generations。
+        路由策略由 image_openai_endpoint 控制：
+        - chat: 仅 /v1/chat/completions
+        - images: 仅 /v1/images/generations
+        - auto: 先 chat，失败/无图再回退 images
         """
         headers = self._openai_headers(api_key)
+        ctx = f" ({error_context})" if error_context else ""
 
-        # 先尝试 chat/completions
-        url = f"{base_url}/v1/chat/completions"
-        system_parts = ["You are an image generation model. Return a single image (no text)."]
-        if aspect_ratio:
-            system_parts.append(f"Aspect ratio: {aspect_ratio}.")
-        if quality:
-            system_parts.append(f"Resolution: {quality}.")
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": " ".join(system_parts)},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.8,
-            "stream": False,
-        }
-        try:
+        route_mode = self.image_openai_endpoint
+        if route_mode in ("chat", "auto"):
+            url = f"{base_url}/v1/chat/completions"
+            system_parts = ["You are an image generation model. Return a single image (no text)."]
+            if aspect_ratio:
+                system_parts.append(f"Aspect ratio: {aspect_ratio}.")
+            if quality:
+                system_parts.append(f"Resolution: {quality}.")
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": " ".join(system_parts)},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.8,
+                "stream": False,
+            }
+            try:
+                response = await self._post_json(url, payload, headers, timeout=300)
+                b64 = self._extract_image_from_openai_response(response)
+                if b64:
+                    return b64
+                remote_url = self._extract_http_url_from_openai_response(response)
+                if remote_url:
+                    downloaded = await self._download_image_as_base64(remote_url)
+                    if downloaded:
+                        return downloaded
+                    print(
+                        f"[Multi 图像] chat/completions 返回了 URL 但下载失败{ctx}，响应正文: "
+                        f"{self._dump_response_for_log(response)}"
+                    )
+                    return None
+                print(
+                    f"[Multi 图像] chat/completions 未提取到图片{ctx}，响应正文: "
+                    f"{self._dump_response_for_log(response)}"
+                )
+            except ClientError:
+                raise
+            except Exception as e:
+                if route_mode == "auto":
+                    print(f"[Multi 图像] chat/completions 失败{ctx}: {e}，尝试 images/generations...")
+                else:
+                    print(f"[Multi 图像] chat/completions 失败{ctx}: {e}")
+            if route_mode == "chat":
+                return None
+
+        if route_mode in ("images", "auto"):
+            url = f"{base_url}/v1/images/generations"
+            payload = {
+                "model": model_name,
+                "prompt": prompt,
+                "response_format": "b64_json",
+            }
             response = await self._post_json(url, payload, headers, timeout=300)
             b64 = self._extract_image_from_openai_response(response)
             if b64:
@@ -810,51 +861,22 @@ class MultiProvider(BaseProvider):
                 if downloaded:
                     return downloaded
                 print(
-                    "[Multi 图像] chat/completions 返回了 URL 但下载失败，响应正文: "
+                    f"[Multi 图像] images/generations 返回了 URL 但下载失败{ctx}，响应正文: "
                     f"{self._dump_response_for_log(response)}"
                 )
                 return None
             print(
-                "[Multi 图像] chat/completions 未提取到图片，响应正文: "
+                f"[Multi 图像] images/generations 未提取到图片{ctx}，响应正文: "
                 f"{self._dump_response_for_log(response)}"
             )
-        except ClientError:
-            raise
-        except Exception as e:
-            print(f"[Multi 图像] chat/completions 失败: {e}，尝试 images/generations...")
-
-        # 回退到 images/generations
-        url = f"{base_url}/v1/images/generations"
-        payload = {
-            "model": model_name,
-            "prompt": prompt,
-            "response_format": "b64_json",
-        }
-        response = await self._post_json(url, payload, headers, timeout=300)
-        b64 = self._extract_image_from_openai_response(response)
-        if b64:
-            return b64
-        remote_url = self._extract_http_url_from_openai_response(response)
-        if remote_url:
-            downloaded = await self._download_image_as_base64(remote_url)
-            if downloaded:
-                return downloaded
-            print(
-                "[Multi 图像] images/generations 返回了 URL 但下载失败，响应正文: "
-                f"{self._dump_response_for_log(response)}"
-            )
-            return None
-        print(
-            "[Multi 图像] images/generations 未提取到图片，响应正文: "
-            f"{self._dump_response_for_log(response)}"
-        )
         return None
 
     async def _image_via_gemini(
         self, model_name, prompt, aspect_ratio, quality,
-        api_key, base_url,
+        api_key, base_url, error_context: str = "",
     ) -> Optional[str]:
         """Gemini 原生图像生成（responseModalities: IMAGE）"""
+        ctx = f" ({error_context})" if error_context else ""
         url = f"{base_url}/v1beta/models/{model_name}:generateContent"
         generation_config: Dict[str, Any] = {
             "temperature": 0.8,
@@ -877,7 +899,7 @@ class MultiProvider(BaseProvider):
         b64 = self._extract_gemini_image(response)
         if not b64:
             print(
-                "[Multi 图像] Gemini 响应未包含可用图片，响应正文: "
+                f"[Multi 图像] Gemini 响应未包含可用图片{ctx}，响应正文: "
                 f"{self._dump_response_for_log(response)}"
             )
         return b64

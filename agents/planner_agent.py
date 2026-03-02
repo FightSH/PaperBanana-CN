@@ -50,7 +50,13 @@ class PlannerAgent(BaseAgent):
 
     async def process(self, data: Dict[str, Any]) -> Dict[str, Any]:
         cfg = self.task_config
-        print(f"[DEBUG] [PlannerAgent] 开始处理, task={cfg['task_name']}, provider={self.exp_config.provider}, model={self.model_name}")
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
+        step_context = f"candidate={candidate_id}, stage=planner, task={cfg['task_name']}"
+        print(
+            f"[DEBUG] [PlannerAgent] {log_prefix} 开始处理, task={cfg['task_name']}, "
+            f"provider={self.exp_config.provider}, model={self.model_name}"
+        )
 
         raw_content = data["content"]
         content = json.dumps(raw_content) if isinstance(raw_content, (dict, list)) else raw_content
@@ -94,7 +100,10 @@ class PlannerAgent(BaseAgent):
         user_prompt += ":"
 
         content_list.append({"type": "text", "text": user_prompt})
-        print(f"[DEBUG] [PlannerAgent] content_list 长度={len(content_list)}, 示例数={len(examples)}")
+        print(
+            f"[DEBUG] [PlannerAgent] {log_prefix} content_list 长度={len(content_list)}, "
+            f"示例数={len(examples)}"
+        )
 
         # 根据 provider 路由 API 调用
         if self.exp_config.provider in ("evolink", "multi"):
@@ -108,6 +117,7 @@ class PlannerAgent(BaseAgent):
                 },
                 max_attempts=5,
                 retry_delay=5,
+                error_context=step_context,
             )
         else:
             from google.genai import types
@@ -122,12 +132,16 @@ class PlannerAgent(BaseAgent):
                 ),
                 max_attempts=5,
                 retry_delay=5,
+                error_context=step_context,
             )
 
         for idx, response in enumerate(response_list):
             data[f"target_{cfg['task_name']}_desc{idx}"] = response.strip()
 
-        print(f"[DEBUG] [PlannerAgent] 完成, 生成 {len(response_list)} 个描述, desc0 长度={len(response_list[0]) if response_list else 0}")
+        print(
+            f"[DEBUG] [PlannerAgent] {log_prefix} 完成, 生成 {len(response_list)} 个描述, "
+            f"desc0 长度={len(response_list[0]) if response_list else 0}"
+        )
         return data
 
 

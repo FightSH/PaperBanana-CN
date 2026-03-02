@@ -50,6 +50,10 @@ class StylistAgent(BaseAgent):
     async def process(self, data: Dict[str, Any]) -> Dict[str, Any]:
         cfg = self.task_config
         task_name = cfg["task_name"]
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
+        step_context = f"candidate={candidate_id}, stage=stylist, task={task_name}"
+        print(f"[DEBUG] [StylistAgent] {log_prefix} 开始处理, provider={self.exp_config.provider}, model={self.model_name}")
 
         input_desc_key = f"target_{task_name}_desc0"
         output_desc_key = f"target_{task_name}_stylist_desc0"
@@ -80,6 +84,7 @@ class StylistAgent(BaseAgent):
                 },
                 max_attempts=5,
                 retry_delay=5,
+                error_context=step_context,
             )
         else:
             from google.genai import types
@@ -94,9 +99,14 @@ class StylistAgent(BaseAgent):
                 ),
                 max_attempts=5,
                 retry_delay=5,
+                error_context=step_context,
             )
 
         data[output_desc_key] = response_list[0]
+        print(
+            f"[DEBUG] [StylistAgent] {log_prefix} 完成, 输入描述长度={len(detailed_description)}, "
+            f"输出描述长度={len(response_list[0]) if response_list else 0}"
+        )
 
         return data
 

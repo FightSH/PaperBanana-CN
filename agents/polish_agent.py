@@ -26,14 +26,15 @@ from utils import generation_utils, image_utils
 from .base_agent import BaseAgent
 
 
-def _load_image_as_base64(image_path: str) -> str:
+def _load_image_as_base64(image_path: str, log_prefix: str = "") -> str:
     """Load an image from path and convert to base64"""
     try:
         with open(image_path, 'rb') as f:
             img_data = f.read()
             return base64.b64encode(img_data).decode('utf-8')
     except Exception as e:
-        print(f"❌ Error loading image {image_path}: {e}")
+        prefix = f"{log_prefix} " if log_prefix else ""
+        print(f"❌ {prefix}Error loading image {image_path}: {e}")
         return None
 
 
@@ -58,7 +59,9 @@ class PolishAgent(BaseAgent):
                 "task_name": "diagram",
             }
 
-    async def _generate_suggestions(self, gt_image_b64: str, style_guide: str) -> str:
+    async def _generate_suggestions(
+        self, gt_image_b64: str, style_guide: str, error_context: str = "", log_prefix: str = ""
+    ) -> str:
         """Step 1: Generate improvement suggestions based on style guide"""
         user_prompt = f"Here is the style guide:\n{style_guide}\n\nPlease analyze the provided image against this style guide and list up to 10 specific improvement suggestions to make the image visually more appealing. If the image is already perfect, just say 'No changes needed'."
 
@@ -86,6 +89,7 @@ class PolishAgent(BaseAgent):
                     },
                     max_attempts=3,
                     retry_delay=10,
+                    error_context=error_context,
                 )
             else:
                 from google.genai import types
@@ -100,26 +104,34 @@ class PolishAgent(BaseAgent):
                     ),
                     max_attempts=3,
                     retry_delay=10,
+                    error_context=error_context,
                 )
             return response_list[0] if response_list else ""
         except Exception as e:
-            print(f"❌ Error during suggestion generation: {e}")
+            prefix = f"{log_prefix} " if log_prefix else ""
+            print(f"❌ {prefix}Error during suggestion generation: {e}")
             return ""
 
     async def process(self, data: Dict[str, Any]) -> Dict[str, Any]:
         cfg = self.task_config
         task_name = cfg["task_name"]
+        candidate_id = data.get("candidate_id", "N/A")
+        log_prefix = f"[candidate={candidate_id}]"
+        print(
+            f"[DEBUG] [PolishAgent] {log_prefix} 开始处理, task={task_name}, "
+            f"provider={self.exp_config.provider}, image_model={self.image_model_name}"
+        )
 
         gt_image_path_rel = data.get("path_to_gt_image")
         if not gt_image_path_rel:
-            print(f"⚠️  No GT image path found in data")
+            print(f"⚠️  [PolishAgent] {log_prefix} No GT image path found in data")
             return data
 
         gt_image_path = self.exp_config.work_dir / f"data/PaperBananaBench/{task_name}" / gt_image_path_rel
 
-        gt_image_b64 = _load_image_as_base64(str(gt_image_path))
+        gt_image_b64 = _load_image_as_base64(str(gt_image_path), log_prefix=log_prefix)
         if not gt_image_b64:
-            print(f"⚠️  Failed to load GT image from {gt_image_path}")
+            print(f"⚠️  [PolishAgent] {log_prefix} Failed to load GT image from {gt_image_path}")
             return data
 
         style_guide_path = self.exp_config.work_dir / "style_guides" / self.style_guide_filename
@@ -127,23 +139,27 @@ class PolishAgent(BaseAgent):
             with open(style_guide_path, "r", encoding="utf-8") as f:
                 style_guide = f.read()
         except Exception as e:
-            print(f"❌ Error loading style guide from {style_guide_path}: {e}")
+            print(f"❌ [PolishAgent] {log_prefix} Error loading style guide from {style_guide_path}: {e}")
             return data
 
-        print(f"🎨 [Step 1] Generating suggestions for {task_name}...")
-        suggestions = await self._generate_suggestions(gt_image_b64, style_guide)
+        step1_context = f"candidate={candidate_id}, stage=polish_suggestion, task={task_name}"
+        print(f"🎨 [PolishAgent] {log_prefix} [Step 1] Generating suggestions for {task_name}...")
+        suggestions = await self._generate_suggestions(
+            gt_image_b64, style_guide, error_context=step1_context, log_prefix=log_prefix
+        )
 
         if not suggestions or "No changes needed" in suggestions:
-            print(f"✨ No changes needed for this image.")
+            print(f"✨ [PolishAgent] {log_prefix} No changes needed for this image.")
             pass
 
         if suggestions:
             data[f"suggestions_{task_name}"] = suggestions
 
-        print(f"📝 Suggestions: {suggestions[:200]}...")
+        print(f"📝 [PolishAgent] {log_prefix} Suggestions: {suggestions[:200]}...")
 
         # Step 2: Polish Image using suggestions
-        print(f"🎨 [Step 2] Polishing image with suggestions...")
+        step2_context = f"candidate={candidate_id}, stage=polish_image, task={task_name}"
+        print(f"🎨 [PolishAgent] {log_prefix} [Step 2] Polishing image with suggestions...")
         user_prompt = f"Please polish this image based on the following suggestions:\n\n{suggestions}\n\nPolished Image:"
 
         content_list = [
@@ -166,7 +182,7 @@ class PolishAgent(BaseAgent):
             }
             if self.exp_config.provider == "evolink":
                 # Evolink 图像编辑：先上传参考图获取 URL，再传给 image_urls
-                print(f"🎨 [Step 2a] 上传参考图到 Evolink 文件服务...")
+                print(f"🎨 [PolishAgent] {log_prefix} [Step 2a] 上传参考图到 Evolink 文件服务...")
                 ref_image_url = await generation_utils.upload_image_to_evolink(
                     gt_image_b64, media_type="image/jpeg"
                 )
@@ -178,6 +194,7 @@ class PolishAgent(BaseAgent):
                 config=image_cfg,
                 max_attempts=self.exp_config.image_max_attempts,
                 retry_delay=self.exp_config.image_retry_delay,
+                error_context=step2_context,
             )
         else:
             from google.genai import types
@@ -197,15 +214,17 @@ class PolishAgent(BaseAgent):
                 ),
                 max_attempts=self.exp_config.image_max_attempts,
                 retry_delay=self.exp_config.image_retry_delay,
+                error_context=step2_context,
             )
 
         if not response_list or not response_list[0]:
-            raise RuntimeError("[PolishAgent] 图像生成返回空响应")
+            raise RuntimeError(f"[PolishAgent] {log_prefix} 图像生成返回空响应")
         converted_jpg = image_utils.convert_png_b64_to_jpg_b64(response_list[0])
         if not converted_jpg:
-            raise RuntimeError("[PolishAgent] 图像转换失败")
+            raise RuntimeError(f"[PolishAgent] {log_prefix} 图像转换失败")
         output_key = f"polished_{task_name}_base64_jpg"
         data[output_key] = converted_jpg
+        print(f"[DEBUG] [PolishAgent] {log_prefix} 完成, output_key={output_key}, 大小={len(converted_jpg)}")
 
         return data
 
