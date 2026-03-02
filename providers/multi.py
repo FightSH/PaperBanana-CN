@@ -66,6 +66,35 @@ class MultiProvider(BaseProvider):
             await self._session.close()
             self._session = None
 
+    def _sanitize_headers_for_log(self, headers: Dict[str, str]) -> Dict[str, str]:
+        """日志脱敏：隐藏敏感头信息。"""
+        safe = dict(headers)
+        auth = safe.get("Authorization")
+        if isinstance(auth, str) and auth:
+            safe["Authorization"] = "Bearer ***"
+        api_key = safe.get("x-goog-api-key")
+        if isinstance(api_key, str) and api_key:
+            safe["x-goog-api-key"] = "***"
+        return safe
+
+    def _summarize_for_log(self, value: Any, max_str_len: int = 240) -> Any:
+        """
+        递归裁剪日志内容，避免超长参数（如 base64）刷屏。
+        仅用于日志展示，不影响真实请求体。
+        """
+        if isinstance(value, dict):
+            return {k: self._summarize_for_log(v, max_str_len=max_str_len) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._summarize_for_log(v, max_str_len=max_str_len) for v in value]
+        if isinstance(value, str):
+            # data URL（常见于多模态图片）仅打印长度与前缀
+            if value.startswith("data:") and ";base64," in value:
+                prefix, b64 = value.split(";base64,", 1)
+                return f"{prefix};base64,<omitted len={len(b64)}>"
+            if len(value) > max_str_len:
+                return f"{value[:max_str_len]}...(len={len(value)})"
+        return value
+
     # ==================== 连接测试 ====================
 
     async def test_text_connection(self, model_name: str) -> str:
@@ -89,6 +118,9 @@ class MultiProvider(BaseProvider):
             return "Error: 未返回有效文本"
         except Exception as e:
             return f"Error: {e}"
+        finally:
+            # 测试连接通常是一次性调用，主动关闭会话避免 Unclosed client session。
+            await self.close()
 
     async def test_image_connection(self, model_name: str) -> str:
         """
@@ -109,6 +141,9 @@ class MultiProvider(BaseProvider):
             return "Error: 未返回有效图像"
         except Exception as e:
             return f"Error: {e}"
+        finally:
+            # 测试连接通常是一次性调用，主动关闭会话避免 Unclosed client session。
+            await self.close()
 
     # ==================== 请求头 ====================
 
@@ -131,6 +166,10 @@ class MultiProvider(BaseProvider):
         timeout: int = 120,
     ) -> Dict[str, Any]:
         print(f"[DEBUG] [Multi] POST {url}")
+        safe_headers = self._sanitize_headers_for_log(headers)
+        safe_payload = self._summarize_for_log(payload)
+        print(f"[DEBUG] [Multi]   headers={json.dumps(safe_headers, ensure_ascii=False)}")
+        print(f"[DEBUG] [Multi]   payload={json.dumps(safe_payload, ensure_ascii=False)}")
         session = await self._get_session()
         async with session.post(
             url, json=payload, headers=headers,
@@ -520,14 +559,11 @@ class MultiProvider(BaseProvider):
             "temperature": 0.8,
             "stream": False,
         }
-
         try:
             response = await self._post_json(url, payload, headers, timeout=300)
-            # 尝试提取内嵌图片
             b64 = self._extract_image_from_openai_response(response)
             if b64:
                 return b64
-            # 尝试提取远程 URL 并下载
             remote_url = self._extract_http_url_from_openai_response(response)
             if remote_url:
                 return await self._download_image_as_base64(remote_url)

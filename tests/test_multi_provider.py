@@ -88,6 +88,40 @@ class TestMultiProviderInit:
         assert headers["Content-Type"] == "application/json"
 
 
+class TestConnectionHelpers:
+    def test_test_text_connection_always_closes_session_on_success(self):
+        p = make_provider()
+        with patch.object(p, "generate_text", new_callable=AsyncMock, return_value=["hello"]), \
+             patch.object(p, "close", new_callable=AsyncMock) as mock_close:
+            result = run(p.test_text_connection("test-model"))
+        assert result == "hello"
+        mock_close.assert_awaited_once()
+
+    def test_test_text_connection_always_closes_session_on_error(self):
+        p = make_provider()
+        with patch.object(p, "generate_text", new_callable=AsyncMock, side_effect=Exception("network down")), \
+             patch.object(p, "close", new_callable=AsyncMock) as mock_close:
+            result = run(p.test_text_connection("test-model"))
+        assert result.startswith("Error:")
+        mock_close.assert_awaited_once()
+
+    def test_test_image_connection_always_closes_session_on_success(self):
+        p = make_provider()
+        with patch.object(p, "generate_image", new_callable=AsyncMock, return_value=["abc123"]), \
+             patch.object(p, "close", new_callable=AsyncMock) as mock_close:
+            result = run(p.test_image_connection("test-model"))
+        assert result == "OK (base64 长度=6)"
+        mock_close.assert_awaited_once()
+
+    def test_test_image_connection_always_closes_session_on_error(self):
+        p = make_provider()
+        with patch.object(p, "generate_image", new_callable=AsyncMock, side_effect=Exception("network down")), \
+             patch.object(p, "close", new_callable=AsyncMock) as mock_close:
+            result = run(p.test_image_connection("test-model"))
+        assert result.startswith("Error:")
+        mock_close.assert_awaited_once()
+
+
 # ==================== 内容格式转换测试 ====================
 
 class TestContentConversion:

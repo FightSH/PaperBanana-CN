@@ -276,7 +276,7 @@ class OpenAICompatClient:
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": "Hello! Please respond with 'OK' to confirm connection."
+                "content": "Hello! I want to know who are you?."
             }
         ]
 
