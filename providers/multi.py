@@ -77,23 +77,59 @@ class MultiProvider(BaseProvider):
             safe["x-goog-api-key"] = "***"
         return safe
 
-    def _summarize_for_log(self, value: Any, max_str_len: int = 240) -> Any:
+    def _is_sensitive_key(self, key: str) -> bool:
+        if not isinstance(key, str):
+            return False
+        k = key.lower()
+        return any(token in k for token in ("key", "token", "secret", "authorization", "password"))
+
+    def _looks_like_base64(self, value: str) -> bool:
+        if not isinstance(value, str):
+            return False
+        stripped = value.strip()
+        if len(stripped) < 512:
+            return False
+        if stripped.startswith("data:") and ";base64," in stripped:
+            return True
+        return bool(re.match(r"^[A-Za-z0-9+/=\s]+$", stripped))
+
+    def _summarize_for_log(self, value: Any, parent_key: str = "", max_str_len: int = 240) -> Any:
         """
         递归裁剪日志内容，避免超长参数（如 base64）刷屏。
         仅用于日志展示，不影响真实请求体。
         """
         if isinstance(value, dict):
-            return {k: self._summarize_for_log(v, max_str_len=max_str_len) for k, v in value.items()}
+            summarized = {}
+            for k, v in value.items():
+                if self._is_sensitive_key(k):
+                    summarized[k] = "***"
+                else:
+                    summarized[k] = self._summarize_for_log(
+                        v, parent_key=str(k), max_str_len=max_str_len
+                    )
+            return summarized
         if isinstance(value, list):
-            return [self._summarize_for_log(v, max_str_len=max_str_len) for v in value]
+            return [self._summarize_for_log(v, parent_key=parent_key, max_str_len=max_str_len) for v in value]
         if isinstance(value, str):
             # data URL（常见于多模态图片）仅打印长度与前缀
             if value.startswith("data:") and ";base64," in value:
                 prefix, b64 = value.split(";base64,", 1)
                 return f"{prefix};base64,<omitted len={len(b64)}>"
+            if self._is_sensitive_key(parent_key):
+                return "***"
+            if self._looks_like_base64(value):
+                compact = re.sub(r"\s+", "", value)
+                return f"<base64 omitted len={len(compact)}>"
             if len(value) > max_str_len:
                 return f"{value[:max_str_len]}...(len={len(value)})"
         return value
+
+    def _dump_response_for_log(self, response: Any) -> str:
+        try:
+            sanitized = self._summarize_for_log(response, max_str_len=2000)
+            return json.dumps(sanitized, ensure_ascii=False)
+        except Exception:
+            return str(response)
 
     # ==================== 连接测试 ====================
 
@@ -176,11 +212,16 @@ class MultiProvider(BaseProvider):
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as resp:
             status = resp.status
-            body = await resp.json()
+            body_text = await resp.text()
+            try:
+                body = json.loads(body_text) if body_text else {}
+            except json.JSONDecodeError:
+                body = {"raw_response": body_text}
             print(f"[DEBUG] [Multi]   status={status}")
             if status >= 400:
                 error_msg = body.get("error", body) if isinstance(body, dict) else body
                 print(f"[DEBUG] [Multi]   error: {error_msg}")
+                print(f"[DEBUG] [Multi]   error_body={self._dump_response_for_log(body)}")
                 if 400 <= status < 500 and status != 429:
                     raise ClientError(f"HTTP {status}: {error_msg}")
             resp.raise_for_status()
@@ -765,7 +806,18 @@ class MultiProvider(BaseProvider):
                 return b64
             remote_url = self._extract_http_url_from_openai_response(response)
             if remote_url:
-                return await self._download_image_as_base64(remote_url)
+                downloaded = await self._download_image_as_base64(remote_url)
+                if downloaded:
+                    return downloaded
+                print(
+                    "[Multi 图像] chat/completions 返回了 URL 但下载失败，响应正文: "
+                    f"{self._dump_response_for_log(response)}"
+                )
+                return None
+            print(
+                "[Multi 图像] chat/completions 未提取到图片，响应正文: "
+                f"{self._dump_response_for_log(response)}"
+            )
         except ClientError:
             raise
         except Exception as e:
@@ -784,7 +836,18 @@ class MultiProvider(BaseProvider):
             return b64
         remote_url = self._extract_http_url_from_openai_response(response)
         if remote_url:
-            return await self._download_image_as_base64(remote_url)
+            downloaded = await self._download_image_as_base64(remote_url)
+            if downloaded:
+                return downloaded
+            print(
+                "[Multi 图像] images/generations 返回了 URL 但下载失败，响应正文: "
+                f"{self._dump_response_for_log(response)}"
+            )
+            return None
+        print(
+            "[Multi 图像] images/generations 未提取到图片，响应正文: "
+            f"{self._dump_response_for_log(response)}"
+        )
         return None
 
     async def _image_via_gemini(
@@ -811,4 +874,10 @@ class MultiProvider(BaseProvider):
         }
         headers = self._gemini_headers(api_key)
         response = await self._post_json(url, payload, headers, timeout=300)
-        return self._extract_gemini_image(response)
+        b64 = self._extract_gemini_image(response)
+        if not b64:
+            print(
+                "[Multi 图像] Gemini 响应未包含可用图片，响应正文: "
+                f"{self._dump_response_for_log(response)}"
+            )
+        return b64

@@ -124,9 +124,10 @@ class VanillaAgent(BaseAgent):
                     config={
                         "aspect_ratio": aspect_ratio,
                         "quality": "2K",
+                        "poll_interval": self.exp_config.image_poll_interval,
                     },
-                    max_attempts=5,
-                    retry_delay=30,
+                    max_attempts=self.exp_config.image_max_attempts,
+                    retry_delay=self.exp_config.image_retry_delay,
                 )
             else:
                 response_list = await generation_utils.call_evolink_text_with_retry_async(
@@ -158,8 +159,8 @@ class VanillaAgent(BaseAgent):
                 model_name=self.model_name,
                 contents=content_list,
                 config=types.GenerateContentConfig(**gen_config_args),
-                max_attempts=5,
-                retry_delay=30,
+                max_attempts=self.exp_config.image_max_attempts if cfg["use_image_generation"] else 5,
+                retry_delay=self.exp_config.image_retry_delay if cfg["use_image_generation"] else 30,
             )
         elif "gpt-image" in self.model_name:
             image_config = {
@@ -172,15 +173,20 @@ class VanillaAgent(BaseAgent):
                 model_name=self.model_name,
                 prompt=prompt_text[:30000],
                 config=image_config,
-                max_attempts=5,
-                retry_delay=30,
+                max_attempts=self.exp_config.image_max_attempts,
+                retry_delay=self.exp_config.image_retry_delay,
             )
         else:
             raise ValueError(f"Unsupported model: {self.model_name}")
 
         output_key = f"vanilla_{cfg['task_name']}_base64_jpg"
         if cfg["use_image_generation"]:
-            data[output_key] = await asyncio.to_thread(image_utils.convert_png_b64_to_jpg_b64, response_list[0])
+            if not response_list or not response_list[0]:
+                raise RuntimeError("[VanillaAgent] 图像生成返回空响应")
+            converted_jpg = await asyncio.to_thread(image_utils.convert_png_b64_to_jpg_b64, response_list[0])
+            if not converted_jpg:
+                raise RuntimeError("[VanillaAgent] 图像转换失败")
+            data[output_key] = converted_jpg
         else:
             if response_list and response_list[0]:
                 raw_code = response_list[0]

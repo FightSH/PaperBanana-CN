@@ -120,19 +120,35 @@ def create_sample_inputs(method_content, caption, diagram_type="Pipeline", aspec
 
     return inputs
 
-async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", retrieval_setting="auto", model_name="", image_model_name="", provider="evolink", api_key="", multi_config=None):
+async def process_parallel_candidates(
+    data_list,
+    exp_mode="dev_planner_critic",
+    retrieval_setting="auto",
+    model_name="",
+    image_model_name="",
+    provider="evolink",
+    api_key="",
+    multi_config=None,
+    image_max_attempts=5,
+    image_retry_delay=30.0,
+    image_poll_interval=3.0,
+):
     """使用 PaperVizProcessor 并行处理多个候选方案。"""
     print(f"\n{'='*60}")
     print(f"[DEBUG] process_parallel_candidates 开始")
     print(f"[DEBUG]   provider={provider}, model={model_name}, image_model={image_model_name}")
     print(f"[DEBUG]   exp_mode={exp_mode}, retrieval={retrieval_setting}, candidates={len(data_list)}")
+    print(
+        f"[DEBUG]   image_retry: max_attempts={image_max_attempts}, "
+        f"retry_delay={image_retry_delay}, poll_interval={image_poll_interval}"
+    )
     print(f"[DEBUG]   api_key={'已设置 (' + api_key[:8] + '...)' if api_key else '未设置'}")
     print(f"{'='*60}")
 
-    # 使用界面传入的 API Key 初始化 Provider
-    if api_key:
-        from utils import generation_utils
-        if provider == "multi" and multi_config:
+    # 使用界面传入的配置初始化 Provider
+    from utils import generation_utils
+    if provider == "multi":
+        if multi_config:
             generation_utils.init_multi_provider(
                 text_api_style=multi_config["text_api_style"],
                 text_api_key=multi_config["text_api_key"],
@@ -141,12 +157,18 @@ async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", 
                 image_api_key=multi_config["image_api_key"],
                 image_base_url=multi_config["image_base_url"],
             )
-        elif provider == "evolink":
+        else:
+            print("[DEBUG] ⚠️ provider=multi 但未提供 multi_config，MultiProvider 可能无法正常工作")
+    elif provider == "evolink":
+        if api_key:
             generation_utils.init_evolink_provider(api_key)
-        elif provider == "gemini":
+        else:
+            print(f"[DEBUG] ⚠️ 未提供 Evolink API Key，Provider 可能无法正常工作")
+    elif provider == "gemini":
+        if api_key:
             generation_utils.init_gemini_client(api_key)
-    else:
-        print(f"[DEBUG] ⚠️ 未提供 API Key，Provider 可能无法正常工作")
+        else:
+            print(f"[DEBUG] ⚠️ 未提供 Gemini API Key，Provider 可能无法正常工作")
 
     # 创建实验配置
     exp_config = config.ExpConfig(
@@ -157,6 +179,9 @@ async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", 
         model_name=model_name,
         image_model_name=image_model_name,
         provider=provider,
+        image_max_attempts=image_max_attempts,
+        image_retry_delay=image_retry_delay,
+        image_poll_interval=image_poll_interval,
         work_dir=Path(__file__).parent,
     )
     print(f"[DEBUG] ExpConfig 已创建: provider={exp_config.provider}, model={exp_config.model_name}, image_model={exp_config.image_model_name}")
@@ -337,6 +362,11 @@ def get_evolution_stages(result, exp_mode):
 def display_candidate_result(result, candidate_id, exp_mode):
     """展示单个候选方案的结果。"""
     task_name = "diagram"
+    if result.get("status") == "failed":
+        st.error(f"候选方案 {candidate_id} 失败：{result.get('error_message', '未知错误')}")
+        if result.get("failed_stage"):
+            st.caption(f"失败阶段：{result['failed_stage']}")
+        return
 
     # 根据 exp_mode 决定展示哪张图像
     # 对于演示模式，始终尝试查找最后一轮评审结果
@@ -502,6 +532,33 @@ def main():
                 value=3,
                 key="tab1_max_critic_rounds",
                 help="评审优化迭代的最大轮次"
+            )
+
+            image_max_attempts = st.number_input(
+                "生图最大重试次数",
+                min_value=1,
+                max_value=20,
+                value=5,
+                key="tab1_image_max_attempts",
+                help="图像生成失败时的最大重试次数"
+            )
+            image_retry_delay = st.number_input(
+                "生图重试间隔(秒)",
+                min_value=0.0,
+                max_value=120.0,
+                value=30.0,
+                step=1.0,
+                key="tab1_image_retry_delay",
+                help="图像生成重试的等待时间（秒）"
+            )
+            image_poll_interval = st.number_input(
+                "生图轮询间隔(秒)",
+                min_value=0.0,
+                max_value=30.0,
+                value=3.0,
+                step=0.5,
+                key="tab1_image_poll_interval",
+                help="异步图像任务状态轮询间隔（秒）"
             )
 
             # Provider 选择
@@ -836,6 +893,9 @@ The framework extends to statistical plots by adjusting the Visualizer and Criti
                             provider=provider,
                             api_key=api_key,
                             multi_config=_multi_cfg,
+                            image_max_attempts=int(image_max_attempts),
+                            image_retry_delay=float(image_retry_delay),
+                            image_poll_interval=float(image_poll_interval),
                         ))
                         st.session_state["results"] = results
                         st.session_state["exp_mode"] = exp_mode

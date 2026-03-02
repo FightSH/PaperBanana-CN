@@ -400,6 +400,60 @@ class TestGenerationUtilsIntegration:
 
         assert hasattr(generation_utils, 'call_evolink_image_with_retry_async')
 
+    @pytest.mark.asyncio
+    async def test_call_evolink_image_raises_when_provider_returns_error(self):
+        """图像生成返回 Error 时，generation_utils 应抛出异常"""
+        from utils import generation_utils
+
+        class _FakeProvider:
+            async def generate_image(self, **kwargs):
+                return ["Error"]
+
+        old_multi = generation_utils.multi_provider
+        old_evo = generation_utils.evolink_provider
+        generation_utils.multi_provider = _FakeProvider()
+        generation_utils.evolink_provider = None
+        try:
+            with pytest.raises(RuntimeError):
+                await generation_utils.call_evolink_image_with_retry_async(
+                    model_name="nano-banana-2-lite",
+                    prompt="test",
+                    config={"aspect_ratio": "16:9", "quality": "2K"},
+                    max_attempts=1,
+                    retry_delay=0,
+                )
+        finally:
+            generation_utils.multi_provider = old_multi
+            generation_utils.evolink_provider = old_evo
+
+    @pytest.mark.asyncio
+    async def test_call_evolink_image_accepts_valid_result(self):
+        """图像生成返回有效 base64 时，generation_utils 正常返回"""
+        from utils import generation_utils
+
+        img_b64 = make_png_base64()
+
+        class _FakeProvider:
+            async def generate_image(self, **kwargs):
+                return [img_b64]
+
+        old_multi = generation_utils.multi_provider
+        old_evo = generation_utils.evolink_provider
+        generation_utils.multi_provider = _FakeProvider()
+        generation_utils.evolink_provider = None
+        try:
+            result = await generation_utils.call_evolink_image_with_retry_async(
+                model_name="nano-banana-2-lite",
+                prompt="test",
+                config={"aspect_ratio": "16:9", "quality": "2K"},
+                max_attempts=1,
+                retry_delay=0,
+            )
+            assert result == [img_b64]
+        finally:
+            generation_utils.multi_provider = old_multi
+            generation_utils.evolink_provider = old_evo
+
 
 # ==================== ExpConfig Provider 字段测试 ====================
 
@@ -416,6 +470,13 @@ class TestExpConfigProvider:
         from utils.config import ExpConfig
         config = ExpConfig(dataset_name="PaperBananaBench")
         assert config.provider == "evolink"  # 默认使用 evolink
+
+    def test_config_has_image_retry_defaults(self):
+        from utils.config import ExpConfig
+        config = ExpConfig(dataset_name="PaperBananaBench")
+        assert config.image_max_attempts == 5
+        assert config.image_retry_delay == 30.0
+        assert config.image_poll_interval == 3.0
 
 
 # ==================== Agent 路由测试 ====================

@@ -82,6 +82,24 @@ async def main():
         default="",
         help="model name to use (default: "")",
     )
+    parser.add_argument(
+        "--image_max_attempts",
+        type=int,
+        default=5,
+        help="maximum retry attempts for image generation (default: 5)",
+    )
+    parser.add_argument(
+        "--image_retry_delay",
+        type=float,
+        default=30.0,
+        help="retry delay in seconds for image generation (default: 30)",
+    )
+    parser.add_argument(
+        "--image_poll_interval",
+        type=float,
+        default=3.0,
+        help="poll interval in seconds for image task status (default: 3)",
+    )
     args = parser.parse_args()
 
     exp_config = config.ExpConfig(
@@ -92,6 +110,9 @@ async def main():
         retrieval_setting=args.retrieval_setting,
         max_critic_rounds=args.max_critic_rounds,
         model_name=args.model_name,
+        image_max_attempts=args.image_max_attempts,
+        image_retry_delay=args.image_retry_delay,
+        image_poll_interval=args.image_poll_interval,
         work_dir=Path(__file__).parent,
     )
     

@@ -37,6 +37,9 @@ class ExpConfig:
     model_name: str = ""
     image_model_name: str = ""
     provider: str = "evolink"  # "evolink", "gemini", or "multi"
+    image_max_attempts: int = 5
+    image_retry_delay: float = 30.0
+    image_poll_interval: float = 3.0
     work_dir: Path = Path(__file__).parent.parent
 
     timestamp: str | None = None

@@ -17,6 +17,7 @@ Processing pipeline of PaperVizAgent
 """
 
 import asyncio
+import traceback
 from typing import List, Dict, Any, AsyncGenerator
 
 import numpy as np
@@ -202,7 +203,31 @@ class PaperVizProcessor:
         semaphore = asyncio.Semaphore(max_concurrent)
         async def process_with_semaphore(doc):
             async with semaphore:
-                return await self.process_single_query(doc, do_eval=do_eval)
+                try:
+                    result = await self.process_single_query(doc, do_eval=do_eval)
+                    if "status" not in result:
+                        result["status"] = "success"
+                    return result
+                except Exception as e:
+                    candidate_id = doc.get("candidate_id", "N/A")
+                    print(f"[ERROR] [candidate={candidate_id}] 处理失败: {type(e).__name__}: {e}")
+                    error_text = f"{type(e).__name__}: {e}".lower()
+                    failed_stage = "unknown"
+                    if "visualizeragent" in error_text:
+                        failed_stage = "visualizer"
+                    elif "vanillaagent" in error_text:
+                        failed_stage = "vanilla"
+                    elif "polishagent" in error_text:
+                        failed_stage = "polish"
+                    failed = dict(doc)
+                    failed.update({
+                        "status": "failed",
+                        "failed_stage": failed_stage,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "error_traceback": traceback.format_exc(),
+                    })
+                    return failed
 
         # Create all tasks
         tasks = []

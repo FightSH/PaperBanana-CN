@@ -123,6 +123,11 @@ class VisualizerAgent(BaseAgent):
             loop = asyncio.get_running_loop()
 
         print(f"[DEBUG] [VisualizerAgent] 待处理 desc_keys: {desc_keys_to_process}")
+        image_max_attempts = self.exp_config.image_max_attempts
+        image_retry_delay = self.exp_config.image_retry_delay
+        image_poll_interval = self.exp_config.image_poll_interval
+        text_max_attempts = 5
+        text_retry_delay = 30
 
         for desc_key in desc_keys_to_process:
             prompt_text = cfg["prompt_template"].format(desc=data[desc_key])
@@ -143,9 +148,10 @@ class VisualizerAgent(BaseAgent):
                         config={
                             "aspect_ratio": aspect_ratio,
                             "quality": "2K",
+                            "poll_interval": image_poll_interval,
                         },
-                        max_attempts=5,
-                        retry_delay=30,
+                        max_attempts=image_max_attempts,
+                        retry_delay=image_retry_delay,
                     )
                 else:
                     # Evolink/Multi 文本生成（用于代码生成）
@@ -157,8 +163,8 @@ class VisualizerAgent(BaseAgent):
                             "temperature": self.exp_config.temperature,
                             "max_output_tokens": cfg["max_output_tokens"],
                         },
-                        max_attempts=5,
-                        retry_delay=30,
+                        max_attempts=text_max_attempts,
+                        retry_delay=text_retry_delay,
                     )
             elif "gemini" in self.model_name:
                 from google.genai import types
@@ -181,8 +187,8 @@ class VisualizerAgent(BaseAgent):
                     model_name=self.model_name,
                     contents=content_list,
                     config=types.GenerateContentConfig(**gen_config_args),
-                    max_attempts=5,
-                    retry_delay=30,
+                    max_attempts=image_max_attempts if cfg["use_image_generation"] else text_max_attempts,
+                    retry_delay=image_retry_delay if cfg["use_image_generation"] else text_retry_delay,
                 )
             elif "gpt-image" in self.model_name:
                 image_config = {
@@ -195,15 +201,14 @@ class VisualizerAgent(BaseAgent):
                     model_name=self.model_name,
                     prompt=prompt_text,
                     config=image_config,
-                    max_attempts=5,
-                    retry_delay=30,
+                    max_attempts=image_max_attempts,
+                    retry_delay=image_retry_delay,
                 )
             else:
                 raise ValueError(f"Unsupported model: {self.model_name}")
 
             if not response_list or not response_list[0]:
-                print(f"[DEBUG] [VisualizerAgent] ⚠️ {desc_key}: API 返回空响应")
-                continue
+                raise RuntimeError(f"[VisualizerAgent] {desc_key}: API 返回空响应")
 
             print(f"[DEBUG] [VisualizerAgent] {desc_key}: API 响应长度={len(response_list[0])}, 值前20字={response_list[0][:20]}...")
 
@@ -216,7 +221,7 @@ class VisualizerAgent(BaseAgent):
                     data[f"{desc_key}_base64_jpg"] = converted_jpg
                     print(f"[DEBUG] [VisualizerAgent] ✓ {desc_key}_base64_jpg 已生成, 大小={len(converted_jpg)}")
                 else:
-                    print(f"[DEBUG] [VisualizerAgent] ❌ {desc_key}: 图像转换失败")
+                    raise RuntimeError(f"[VisualizerAgent] {desc_key}: 图像转换失败")
             else:
                 raw_code = response_list[0]
 

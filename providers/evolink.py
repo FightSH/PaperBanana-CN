@@ -5,6 +5,8 @@ Evolink API Provider
 
 import asyncio
 import base64
+import json
+import re
 from typing import List, Dict, Any, Optional
 
 import aiohttp
@@ -46,6 +48,52 @@ class EvolinkProvider(BaseProvider):
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+
+    def _is_sensitive_key(self, key: str) -> bool:
+        if not isinstance(key, str):
+            return False
+        k = key.lower()
+        return any(token in k for token in ("key", "token", "secret", "authorization", "password"))
+
+    def _looks_like_base64(self, value: str) -> bool:
+        if not isinstance(value, str):
+            return False
+        stripped = value.strip()
+        if len(stripped) < 512:
+            return False
+        if stripped.startswith("data:") and ";base64," in stripped:
+            return True
+        return bool(re.match(r"^[A-Za-z0-9+/=\s]+$", stripped))
+
+    def _sanitize_for_log(self, value: Any, parent_key: str = "", max_str_len: int = 2000) -> Any:
+        if isinstance(value, dict):
+            sanitized = {}
+            for k, v in value.items():
+                if self._is_sensitive_key(k):
+                    sanitized[k] = "***"
+                else:
+                    sanitized[k] = self._sanitize_for_log(v, parent_key=str(k), max_str_len=max_str_len)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_for_log(v, parent_key=parent_key, max_str_len=max_str_len) for v in value]
+        if isinstance(value, str):
+            if value.startswith("data:") and ";base64," in value:
+                prefix, b64 = value.split(";base64,", 1)
+                return f"{prefix};base64,<omitted len={len(b64)}>"
+            if self._is_sensitive_key(parent_key):
+                return "***"
+            if self._looks_like_base64(value):
+                compact = re.sub(r"\s+", "", value)
+                return f"<base64 omitted len={len(compact)}>"
+            if len(value) > max_str_len:
+                return f"{value[:max_str_len]}...(len={len(value)})"
+        return value
+
+    def _dump_for_log(self, value: Any) -> str:
+        try:
+            return json.dumps(self._sanitize_for_log(value), ensure_ascii=False)
+        except Exception:
+            return str(value)
 
     def _get_headers(self) -> Dict[str, str]:
         return {
@@ -174,11 +222,16 @@ class EvolinkProvider(BaseProvider):
             timeout=aiohttp.ClientTimeout(total=120),
         ) as resp:
             status = resp.status
-            body = await resp.json()
+            body_text = await resp.text()
+            try:
+                body = json.loads(body_text) if body_text else {}
+            except json.JSONDecodeError:
+                body = {"raw_response": body_text}
             print(f"[DEBUG] [Evolink]   响应 status={status}, keys={list(body.keys()) if isinstance(body, dict) else type(body)}")
             if status >= 400:
                 error_msg = body.get("error", body) if isinstance(body, dict) else body
                 print(f"[DEBUG] [Evolink]   ❌ 错误详情: {error_msg}")
+                print(f"[DEBUG] [Evolink]   ❌ 响应正文: {self._dump_for_log(body)}")
                 # 4xx 客户端错误不重试，直接抛出特定异常
                 if 400 <= status < 500 and status != 429:
                     raise ClientError(f"HTTP {status}: {error_msg}")
@@ -194,9 +247,13 @@ class EvolinkProvider(BaseProvider):
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             status = resp.status
-            body = await resp.json()
+            body_text = await resp.text()
+            try:
+                body = json.loads(body_text) if body_text else {}
+            except json.JSONDecodeError:
+                body = {"raw_response": body_text}
             if status >= 400:
-                print(f"[DEBUG] [Evolink] GET {url} ❌ status={status}, body={body}")
+                print(f"[DEBUG] [Evolink] GET {url} ❌ status={status}, body={self._dump_for_log(body)}")
             resp.raise_for_status()
             return body
 
@@ -365,6 +422,7 @@ class EvolinkProvider(BaseProvider):
 
                 if not task_id:
                     print(f"[Evolink 图像] 创建任务失败，未返回任务 ID")
+                    print(f"[Evolink 图像] 创建任务响应: {self._dump_for_log(create_response)}")
                     if attempt < max_attempts - 1:
                         await asyncio.sleep(retry_delay)
                     continue
@@ -373,11 +431,13 @@ class EvolinkProvider(BaseProvider):
 
                 # 步骤 2：轮询任务状态
                 poll_url = f"{self.base_url}/v1/tasks/{task_id}"
+                last_poll_response: Dict[str, Any] = {}
                 for poll_count in range(max_polls):
                     if poll_interval > 0:
                         await asyncio.sleep(poll_interval)
 
                     poll_response = await self._get_json(poll_url)
+                    last_poll_response = poll_response
                     status = poll_response.get("status", "")
                     progress = poll_response.get("progress", 0)
 
@@ -392,13 +452,16 @@ class EvolinkProvider(BaseProvider):
                                 return [b64_image]
                             else:
                                 print(f"[Evolink 图像] 图片下载失败")
+                                print(f"[Evolink 图像] 任务响应: {self._dump_for_log(poll_response)}")
                                 break
                         else:
                             print(f"[Evolink 图像] 任务完成但无图片结果")
+                            print(f"[Evolink 图像] 任务响应: {self._dump_for_log(poll_response)}")
                             break
 
                     elif status in ("failed", "cancelled"):
                         print(f"[Evolink 图像] 任务失败: {status}")
+                        print(f"[Evolink 图像] 任务响应: {self._dump_for_log(poll_response)}")
                         break
 
                     else:
@@ -409,6 +472,8 @@ class EvolinkProvider(BaseProvider):
                 # 如果轮询结束仍未完成
                 context_msg = f" ({error_context})" if error_context else ""
                 print(f"[Evolink 图像] 第 {attempt + 1} 次尝试未成功{context_msg}")
+                if last_poll_response:
+                    print(f"[Evolink 图像] 最后一次轮询响应: {self._dump_for_log(last_poll_response)}")
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(retry_delay)
 

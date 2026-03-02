@@ -158,59 +158,54 @@ class PolishAgent(BaseAgent):
             }
         ]
 
-        try:
-            if self.exp_config.provider in ("evolink", "multi"):
-                image_cfg = {
-                    "aspect_ratio": data.get("additional_info", {}).get("rounded_ratio", "16:9"),
-                    "quality": "2K",
-                }
-                if self.exp_config.provider == "evolink":
-                    # Evolink 图像编辑：先上传参考图获取 URL，再传给 image_urls
-                    print(f"🎨 [Step 2a] 上传参考图到 Evolink 文件服务...")
-                    ref_image_url = await generation_utils.upload_image_to_evolink(
-                        gt_image_b64, media_type="image/jpeg"
-                    )
-                    image_cfg["image_urls"] = [ref_image_url]
-
-                response_list = await generation_utils.call_evolink_image_with_retry_async(
-                    model_name=self.image_model_name,
-                    prompt=user_prompt,
-                    config=image_cfg,
-                    max_attempts=5,
-                    retry_delay=30,
+        if self.exp_config.provider in ("evolink", "multi"):
+            image_cfg = {
+                "aspect_ratio": data.get("additional_info", {}).get("rounded_ratio", "16:9"),
+                "quality": "2K",
+                "poll_interval": self.exp_config.image_poll_interval,
+            }
+            if self.exp_config.provider == "evolink":
+                # Evolink 图像编辑：先上传参考图获取 URL，再传给 image_urls
+                print(f"🎨 [Step 2a] 上传参考图到 Evolink 文件服务...")
+                ref_image_url = await generation_utils.upload_image_to_evolink(
+                    gt_image_b64, media_type="image/jpeg"
                 )
-            else:
-                from google.genai import types
-                response_list = await generation_utils.call_gemini_with_retry_async(
-                    model_name=self.image_model_name,
-                    contents=content_list,
-                    config=types.GenerateContentConfig(
-                        system_instruction=self.system_prompt,
-                        temperature=self.exp_config.temperature,
-                        candidate_count=1,
-                        max_output_tokens=50000,
-                        response_modalities=["IMAGE"],
-                        image_config=types.ImageConfig(
-                            aspect_ratio=data.get("additional_info", {}).get("rounded_ratio", "16:9"),
-                            image_size="1k",
-                        ),
+                image_cfg["image_urls"] = [ref_image_url]
+
+            response_list = await generation_utils.call_evolink_image_with_retry_async(
+                model_name=self.image_model_name,
+                prompt=user_prompt,
+                config=image_cfg,
+                max_attempts=self.exp_config.image_max_attempts,
+                retry_delay=self.exp_config.image_retry_delay,
+            )
+        else:
+            from google.genai import types
+            response_list = await generation_utils.call_gemini_with_retry_async(
+                model_name=self.image_model_name,
+                contents=content_list,
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_prompt,
+                    temperature=self.exp_config.temperature,
+                    candidate_count=1,
+                    max_output_tokens=50000,
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=data.get("additional_info", {}).get("rounded_ratio", "16:9"),
+                        image_size="1k",
                     ),
-                    max_attempts=5,
-                    retry_delay=30,
-                )
+                ),
+                max_attempts=self.exp_config.image_max_attempts,
+                retry_delay=self.exp_config.image_retry_delay,
+            )
 
-            if response_list and response_list[0]:
-                converted_jpg = image_utils.convert_png_b64_to_jpg_b64(response_list[0])
-                if converted_jpg:
-                    output_key = f"polished_{task_name}_base64_jpg"
-                    data[output_key] = converted_jpg
-                else:
-                    print(f"⚠️  Image conversion failed")
-            else:
-                print(f"⚠️  No response from model")
-
-        except Exception as e:
-            print(f"❌ Error during image generation: {e}")
+        if not response_list or not response_list[0]:
+            raise RuntimeError("[PolishAgent] 图像生成返回空响应")
+        converted_jpg = image_utils.convert_png_b64_to_jpg_b64(response_list[0])
+        if not converted_jpg:
+            raise RuntimeError("[PolishAgent] 图像转换失败")
+        output_key = f"polished_{task_name}_base64_jpg"
+        data[output_key] = converted_jpg
 
         return data
 

@@ -25,6 +25,60 @@ class ImageGenerationError(Exception):
 
 
 # ======================== 核心工具函数 ========================
+def is_sensitive_key(key: Any) -> bool:
+    """判断字段名是否包含敏感信息。"""
+    if not isinstance(key, str):
+        return False
+    lower = key.lower()
+    return any(token in lower for token in ("key", "token", "secret", "authorization", "password"))
+
+
+def looks_like_base64(value: Any) -> bool:
+    """粗略判断字符串是否像 base64（用于日志脱敏）。"""
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if len(stripped) < 512:
+        return False
+    if stripped.startswith("data:") and ";base64," in stripped:
+        return True
+    return bool(re.match(r"^[A-Za-z0-9+/=\s]+$", stripped))
+
+
+def sanitize_for_log(value: Any, parent_key: str = "", max_str_len: int = 1200) -> Any:
+    """递归脱敏并裁剪日志内容，避免泄露密钥和刷屏。"""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if is_sensitive_key(k):
+                out[k] = "***"
+            else:
+                out[k] = sanitize_for_log(v, parent_key=str(k), max_str_len=max_str_len)
+        return out
+    if isinstance(value, list):
+        return [sanitize_for_log(v, parent_key=parent_key, max_str_len=max_str_len) for v in value]
+    if isinstance(value, str):
+        if value.startswith("data:") and ";base64," in value:
+            prefix, b64 = value.split(";base64,", 1)
+            return f"{prefix};base64,<omitted len={len(b64)}>"
+        if is_sensitive_key(parent_key):
+            return "***"
+        if looks_like_base64(value):
+            compact = re.sub(r"\s+", "", value)
+            return f"<base64 omitted len={len(compact)}>"
+        if len(value) > max_str_len:
+            return f"{value[:max_str_len]}...(len={len(value)})"
+    return value
+
+
+def dump_for_log(value: Any) -> str:
+    """将任意响应对象转换为可打印的脱敏文本。"""
+    try:
+        return json.dumps(sanitize_for_log(value), ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
 def resolve_request_mode(value: Any) -> str:
     """解析请求模式（gemini/openai）"""
     raw = str(value or "").strip().lower()
@@ -52,7 +106,7 @@ def extract_image_from_data_url(data_url: str) -> Optional[Dict[str, str]]:
 
 def guess_mime_type_from_url(url: str) -> Optional[str]:
     """从 URL 后缀猜测 MIME 类型"""
-    clean = url.lower().split('/[?#]/')[0] if url else ""
+    clean = re.split(r"[?#]", url.lower(), maxsplit=1)[0] if url else ""
     if clean.endswith(".png"):
         return "image/png"
     elif clean.endswith((".jpg", ".jpeg")):
@@ -151,14 +205,22 @@ def extract_image_from_openai_chat_message(message: Any) -> Optional[Dict[str, s
         if (trimmed.startswith("{") and trimmed.endswith("}")) or (trimmed.startswith("[") and trimmed.endswith("]")):
             try:
                 parsed = json.loads(trimmed)
-                b64 = parsed.get("imageBase64") or parsed.get("image_base64") or parsed.get("b64_json") or parsed.get(
-                    "b64")
-                if isinstance(b64, str) and b64.strip():
-                    mime = parsed.get("mimeType") or parsed.get("mime_type") or "image/png"
-                    return {
-                        "mime_type": mime,
-                        "image_base64": b64.strip()
-                    }
+                parsed_items = parsed if isinstance(parsed, list) else [parsed]
+                for item in parsed_items:
+                    if not isinstance(item, dict):
+                        continue
+                    b64 = (
+                        item.get("imageBase64")
+                        or item.get("image_base64")
+                        or item.get("b64_json")
+                        or item.get("b64")
+                    )
+                    if isinstance(b64, str) and b64.strip():
+                        mime = item.get("mimeType") or item.get("mime_type") or "image/png"
+                        return {
+                            "mime_type": mime,
+                            "image_base64": b64.strip()
+                        }
             except:
                 pass
 
@@ -177,7 +239,7 @@ def extract_image_from_openai_chat_message(message: Any) -> Optional[Dict[str, s
             }
 
         # 兜底：纯 Base64 字符串
-        normalized = trimmed.replace("\s+", "")
+        normalized = re.sub(r"\s+", "", trimmed)
         if (len(normalized) > 1024 and
                 re.match(r"^[A-Za-z0-9+/=]+$", normalized) and
                 len(normalized) % 4 == 0):
@@ -368,12 +430,16 @@ async def generate_image_via_openai(
                 timeout=aiohttp.ClientTimeout(total=300)  # 5分钟超时
         ) as response:
             response_text = await response.text()
+            try:
+                json_data = json.loads(response_text)
+            except json.JSONDecodeError:
+                json_data = {"raw_response": response_text}
 
             if response.status != 200:
                 # 解析错误信息
                 error_details = {}
                 try:
-                    error_json = json.loads(response_text)
+                    error_json = json_data
                     err = error_json.get("error") or error_json
                     error_details = {
                         "errorName": err.get("code") or err.get("type") or f"HTTP_{response.status}",
@@ -390,10 +456,8 @@ async def generate_image_via_openai(
                         "requestUrl": api_url,
                         "responseBody": response_text[:1000]
                     }
+                print(f"[ImageClient][OpenAI] ❌ status={response.status}, response={dump_for_log(json_data)}")
                 raise ImageGenerationError(error_details["errorMessage"], error_details)
-
-            # 解析响应
-            json_data = json.loads(response_text)
 
             # 提取图片数据
             image_data = extract_image_from_openai_response(json_data)
@@ -409,6 +473,7 @@ async def generate_image_via_openai(
                 return await download_image_url_as_base64(session, remote_url)
 
             # 无图片数据
+            print(f"[ImageClient][OpenAI] ⚠️ 未提取到图片，response={dump_for_log(json_data)}")
             raise ImageGenerationError("API 未返回图片数据", {
                 "errorName": "NoImageData",
                 "errorMessage": "OpenAI 兼容接口响应中未识别到图片数据",
@@ -483,12 +548,16 @@ async def generate_image_via_gemini(
                 timeout=aiohttp.ClientTimeout(total=300)  # 5分钟超时
         ) as response:
             response_text = await response.text()
+            try:
+                json_data = json.loads(response_text)
+            except json.JSONDecodeError:
+                json_data = {"raw_response": response_text}
 
             if response.status != 200:
                 # 解析错误信息
                 error_details = {}
                 try:
-                    error_json = json.loads(response_text)
+                    error_json = json_data
                     err = error_json.get("error") or error_json
                     error_details = {
                         "errorName": err.get("code") or err.get("status") or f"HTTP_{response.status}",
@@ -505,14 +574,13 @@ async def generate_image_via_gemini(
                         "requestUrl": endpoint,
                         "responseBody": response_text[:1000]
                     }
+                print(f"[ImageClient][Gemini] ❌ status={response.status}, response={dump_for_log(json_data)}")
                 raise ImageGenerationError(error_details["errorMessage"], error_details)
-
-            # 解析响应
-            json_data = json.loads(response_text)
 
             # 提取图片数据
             candidates = json_data.get("candidates", [])
             if not candidates:
+                print(f"[ImageClient][Gemini] ⚠️ candidates 为空，response={dump_for_log(json_data)}")
                 raise ImageGenerationError("API 未返回任何结果", {
                     "errorName": "EmptyResponse",
                     "errorMessage": "Gemini API 返回了空的 candidates 数组",
@@ -527,12 +595,14 @@ async def generate_image_via_gemini(
                 # 检查是否返回文本
                 text_part = next((p for p in parts if p.get("text")), None)
                 if text_part:
+                    print(f"[ImageClient][Gemini] ⚠️ 返回文本无图片，response={dump_for_log(json_data)}")
                     raise ImageGenerationError("API 返回了文本而非图片", {
                         "errorName": "NoImageGenerated",
                         "errorMessage": f"模型返回了文本内容而非图片：{text_part['text'][:200]}...",
                         "requestUrl": endpoint,
                         "responseBody": response_text[:800]
                     })
+                print(f"[ImageClient][Gemini] ⚠️ 无 inlineData 图片，response={dump_for_log(json_data)}")
                 raise ImageGenerationError("API 未返回图片数据", {
                     "errorName": "NoImageData",
                     "errorMessage": "Gemini API 响应中未包含 inlineData 图片数据",

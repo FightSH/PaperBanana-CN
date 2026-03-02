@@ -277,7 +277,7 @@ async def call_evolink_image_with_retry_async(
     Args:
         model_name: 图像模型名称（如 "nano-banana-2-lite"，通过 /v1/images/generations）
         prompt: 图像描述提示词
-        config: 配置字典，需包含 aspect_ratio, quality 等
+        config: 配置字典，支持 aspect_ratio, quality, image_urls, poll_interval
         max_attempts: 最大重试次数
         retry_delay: 重试间隔
         error_context: 错误上下文
@@ -290,8 +290,9 @@ async def call_evolink_image_with_retry_async(
     aspect_ratio = config.get("aspect_ratio", "16:9")
     quality = config.get("quality", "2K")
     image_urls = config.get("image_urls", None)
+    poll_interval = config.get("poll_interval", 3)
 
-    return await provider.generate_image(
+    result = await provider.generate_image(
         model_name=model_name,
         prompt=prompt,
         aspect_ratio=aspect_ratio,
@@ -299,8 +300,18 @@ async def call_evolink_image_with_retry_async(
         image_urls=image_urls,
         max_attempts=max_attempts,
         retry_delay=retry_delay,
+        poll_interval=poll_interval,
         error_context=error_context,
     )
+    first = result[0].strip() if isinstance(result, list) and result and isinstance(result[0], str) else ""
+    if not first or first == "Error":
+        ctx = f" ({error_context})" if error_context else ""
+        raise RuntimeError(
+            f"图像生成失败{ctx}: provider={provider.__class__.__name__}, "
+            f"model={model_name}, max_attempts={max_attempts}, retry_delay={retry_delay}, "
+            f"poll_interval={poll_interval}"
+        )
+    return result
 
 
 # ==================== 原始 Gemini 调用函数（保留兼容性） ====================

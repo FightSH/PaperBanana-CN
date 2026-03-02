@@ -740,6 +740,36 @@ class TestAgentRoutingMulti:
         mock_provider_call.assert_awaited_once()
         mock_gemini_call.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_visualizer_raises_when_image_conversion_fails(self):
+        from utils.config import ExpConfig
+        from agents.visualizer_agent import VisualizerAgent
+        from utils import generation_utils, image_utils
+
+        cfg = ExpConfig(
+            dataset_name="Test",
+            provider="multi",
+            task_name="diagram",
+            retrieval_setting="none",
+            model_name="gemini-2.5-flash",
+            image_model_name="gemini-2.0-flash-preview-image-generation",
+        )
+        agent = VisualizerAgent(exp_config=cfg)
+        data = {
+            "target_diagram_desc0": "draw a diagram",
+            "additional_info": {"rounded_ratio": "16:9"},
+        }
+
+        with patch.object(
+            generation_utils, "call_evolink_image_with_retry_async",
+            new=AsyncMock(return_value=["Error"])
+        ), patch.object(
+            image_utils, "convert_png_b64_to_jpg_b64",
+            return_value=None
+        ):
+            with pytest.raises(RuntimeError):
+                await agent.process(data)
+
 
 # ==================== ExpConfig Provider 字段测试 ====================
 
