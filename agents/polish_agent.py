@@ -75,7 +75,7 @@ class PolishAgent(BaseAgent):
         ]
 
         try:
-            if self.exp_config.provider == "evolink":
+            if self.exp_config.provider in ("evolink", "multi"):
                 response_list = await generation_utils.call_evolink_text_with_retry_async(
                     model_name=self.text_model_name,
                     contents=content_list,
@@ -159,20 +159,23 @@ class PolishAgent(BaseAgent):
         ]
 
         try:
-            if self.exp_config.provider == "evolink":
-                # Evolink 图像生成：先上传参考图获取 URL，再传给 image_urls
-                print(f"🎨 [Step 2a] 上传参考图到 Evolink 文件服务...")
-                ref_image_url = await generation_utils.upload_image_to_evolink(
-                    gt_image_b64, media_type="image/jpeg"
-                )
+            if self.exp_config.provider in ("evolink", "multi"):
+                image_cfg = {
+                    "aspect_ratio": data.get("additional_info", {}).get("rounded_ratio", "16:9"),
+                    "quality": "2K",
+                }
+                if self.exp_config.provider == "evolink":
+                    # Evolink 图像编辑：先上传参考图获取 URL，再传给 image_urls
+                    print(f"🎨 [Step 2a] 上传参考图到 Evolink 文件服务...")
+                    ref_image_url = await generation_utils.upload_image_to_evolink(
+                        gt_image_b64, media_type="image/jpeg"
+                    )
+                    image_cfg["image_urls"] = [ref_image_url]
+
                 response_list = await generation_utils.call_evolink_image_with_retry_async(
                     model_name=self.image_model_name,
                     prompt=user_prompt,
-                    config={
-                        "aspect_ratio": data.get("additional_info", {}).get("rounded_ratio", "16:9"),
-                        "quality": "2K",
-                        "image_urls": [ref_image_url],
-                    },
+                    config=image_cfg,
                     max_attempts=5,
                     retry_delay=30,
                 )

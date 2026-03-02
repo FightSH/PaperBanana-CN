@@ -130,9 +130,9 @@ class VisualizerAgent(BaseAgent):
             print(f"[DEBUG] [VisualizerAgent] 处理 {desc_key}, prompt 长度={len(prompt_text)}")
 
             # 根据 provider 路由 API 调用
-            if self.exp_config.provider == "evolink":
+            if self.exp_config.provider in ("evolink", "multi"):
                 if cfg["use_image_generation"]:
-                    # Evolink 图像生成（异步任务模式）
+                    # Evolink/Multi 图像生成
                     aspect_ratio = "1:1"
                     if "additional_info" in data and "rounded_ratio" in data["additional_info"]:
                         aspect_ratio = data["additional_info"]["rounded_ratio"]
@@ -148,7 +148,7 @@ class VisualizerAgent(BaseAgent):
                         retry_delay=30,
                     )
                 else:
-                    # Evolink 文本生成（用于代码生成）
+                    # Evolink/Multi 文本生成（用于代码生成）
                     response_list = await generation_utils.call_evolink_text_with_retry_async(
                         model_name=self.exp_config.model_name,
                         contents=content_list,

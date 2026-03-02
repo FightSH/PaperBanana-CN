@@ -254,6 +254,18 @@ class TestGeminiExtraction:
         result = p._extract_gemini_image(data)
         assert result == img_b64
 
+    def test_extract_image_from_second_candidate(self):
+        p = make_provider()
+        img_b64 = make_png_base64()
+        data = {
+            "candidates": [
+                {"content": {"parts": [{"text": "only text"}]}},
+                {"content": {"parts": [{"inlineData": {"data": img_b64, "mimeType": "image/png"}}]}},
+            ]
+        }
+        result = p._extract_gemini_image(data)
+        assert result == img_b64
+
 
 # ==================== OpenAI 图像响应提取测试 ====================
 
@@ -301,6 +313,54 @@ class TestOpenAIImageExtraction:
         url = p._extract_http_url_from_openai_response(data)
         assert url is not None
         assert "cdn.example.com" in url
+
+    def test_extract_from_chat_message_json_string(self):
+        p = make_provider()
+        img_b64 = make_png_base64()
+        json_content = json.dumps({"image_base64": img_b64, "mime_type": "image/png"})
+        data = {"choices": [{"message": {"content": json_content}}]}
+        assert p._extract_image_from_openai_response(data) == img_b64
+
+    def test_extract_from_message_images_data_url(self):
+        p = make_provider()
+        img_b64 = make_png_base64()
+        data = {
+            "choices": [{
+                "message": {
+                    "content": "text only",
+                    "images": [{"image_url": {"url": f"data:image/png;base64,{img_b64}"}}],
+                }
+            }]
+        }
+        assert p._extract_image_from_openai_response(data) == img_b64
+
+    def test_extract_from_responses_output(self):
+        p = make_provider()
+        img_b64 = make_png_base64()
+        data = {
+            "output": [
+                {"type": "reasoning", "content": [{"type": "output_text", "text": "thinking"}]},
+                {"type": "image_generation_call", "result": img_b64},
+            ]
+        }
+        assert p._extract_image_from_openai_response(data) == img_b64
+
+    def test_extract_http_url_from_markdown_text(self):
+        p = make_provider()
+        data = {"choices": [{"message": {"content": "![img](https://img.example.com/a.png)"}}]}
+        assert p._extract_http_url_from_openai_response(data) == "https://img.example.com/a.png"
+
+    def test_extract_http_url_from_responses_output(self):
+        p = make_provider()
+        data = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "image_url", "image_url": {"url": "https://cdn.example.com/r.png"}}],
+                }
+            ]
+        }
+        assert p._extract_http_url_from_openai_response(data) == "https://cdn.example.com/r.png"
 
     def test_no_image_returns_none(self):
         p = make_provider()
@@ -605,6 +665,80 @@ class TestGenerationUtilsMulti:
             image_base_url="",
         )
         assert generation_utils.multi_provider is old
+
+
+# ==================== Agent 路由测试（multi provider） ====================
+
+class TestAgentRoutingMulti:
+    @pytest.mark.asyncio
+    async def test_planner_routes_multi_to_provider_path(self):
+        from utils.config import ExpConfig
+        from agents.planner_agent import PlannerAgent
+        from utils import generation_utils
+
+        cfg = ExpConfig(
+            dataset_name="Test",
+            provider="multi",
+            task_name="diagram",
+            retrieval_setting="none",
+            model_name="gemini-2.5-flash",
+            image_model_name="gemini-2.0-flash-preview-image-generation",
+        )
+        agent = PlannerAgent(exp_config=cfg)
+        data = {
+            "content": "method",
+            "visual_intent": "caption",
+            "retrieved_examples": [],
+        }
+
+        with patch.object(
+            generation_utils, "call_evolink_text_with_retry_async",
+            new=AsyncMock(return_value=["planner-ok"])
+        ) as mock_provider_call, patch.object(
+            generation_utils, "call_gemini_with_retry_async",
+            new=AsyncMock(return_value=["should-not-be-used"])
+        ) as mock_gemini_call:
+            result = await agent.process(data)
+
+        assert result["target_diagram_desc0"] == "planner-ok"
+        mock_provider_call.assert_awaited_once()
+        mock_gemini_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_visualizer_routes_multi_to_provider_path(self):
+        from utils.config import ExpConfig
+        from agents.visualizer_agent import VisualizerAgent
+        from utils import generation_utils, image_utils
+
+        cfg = ExpConfig(
+            dataset_name="Test",
+            provider="multi",
+            task_name="diagram",
+            retrieval_setting="none",
+            model_name="gemini-2.5-flash",
+            image_model_name="gemini-2.0-flash-preview-image-generation",
+        )
+        agent = VisualizerAgent(exp_config=cfg)
+        data = {
+            "target_diagram_desc0": "draw a diagram",
+            "additional_info": {"rounded_ratio": "16:9"},
+        }
+
+        with patch.object(
+            generation_utils, "call_evolink_image_with_retry_async",
+            new=AsyncMock(return_value=[make_png_base64()])
+        ) as mock_provider_call, patch.object(
+            generation_utils, "call_gemini_with_retry_async",
+            new=AsyncMock(return_value=["should-not-be-used"])
+        ) as mock_gemini_call, patch.object(
+            image_utils, "convert_png_b64_to_jpg_b64",
+            return_value="jpg-b64"
+        ):
+            result = await agent.process(data)
+
+        assert result["target_diagram_desc0_base64_jpg"] == "jpg-b64"
+        mock_provider_call.assert_awaited_once()
+        mock_gemini_call.assert_not_awaited()
 
 
 # ==================== ExpConfig Provider 字段测试 ====================

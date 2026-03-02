@@ -101,7 +101,7 @@ class CriticAgent(BaseAgent):
         })
 
         # 根据 provider 路由 API 调用
-        if self.exp_config.provider == "evolink":
+        if self.exp_config.provider in ("evolink", "multi"):
             response_list = await generation_utils.call_evolink_text_with_retry_async(
                 model_name=self.model_name,
                 contents=content_list,

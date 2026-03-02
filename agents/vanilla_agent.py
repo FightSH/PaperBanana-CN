@@ -115,7 +115,7 @@ class VanillaAgent(BaseAgent):
         content_list = [{"type": "text", "text": prompt_text}]
 
         # 根据 provider 路由 API 调用
-        if self.exp_config.provider == "evolink":
+        if self.exp_config.provider in ("evolink", "multi"):
             if cfg["use_image_generation"]:
                 aspect_ratio = data.get("additional_info", {}).get("rounded_ratio", "1:1")
                 response_list = await generation_utils.call_evolink_image_with_retry_async(

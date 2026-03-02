@@ -292,69 +292,223 @@ class MultiProvider(BaseProvider):
         """从 Gemini 响应中提取 inlineData 图片，返回 base64"""
         try:
             candidates = json_data.get("candidates", [])
-            if not candidates:
-                return None
-            parts = candidates[0].get("content", {}).get("parts", [])
-            for part in parts:
-                inline = part.get("inlineData") or part.get("inline_data")
-                if inline and inline.get("data"):
-                    return inline["data"]
+            for candidate in candidates:
+                parts = candidate.get("content", {}).get("parts", [])
+                for part in parts:
+                    inline = part.get("inlineData") or part.get("inline_data")
+                    if inline and isinstance(inline.get("data"), str) and inline["data"].strip():
+                        return inline["data"].strip()
             return None
         except Exception:
             return None
 
     # ==================== OpenAI 图像响应提取 ====================
 
+    def _extract_image_from_data_url(self, data_url: str) -> Optional[str]:
+        """从 data URL 提取 base64 图片数据。"""
+        if not isinstance(data_url, str):
+            return None
+        match = re.match(
+            r"^\s*data:image\/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=]+)\s*$",
+            data_url,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+        return None
+
+    def _extract_http_image_url_from_text(self, text: str) -> Optional[str]:
+        """从文本提取 HTTP 图片 URL（markdown/html/plain）。"""
+        if not isinstance(text, str):
+            return None
+        t = text.strip()
+        if not t:
+            return None
+
+        md_match = re.search(r"!\[[^\]]*]\((https?:\/\/[^)\s]+)\)", t, re.IGNORECASE)
+        if md_match:
+            return md_match.group(1)
+
+        html_match = re.search(r'<img[^>]+src=["\'](https?:\/\/[^"\']+)["\']', t, re.IGNORECASE)
+        if html_match:
+            return html_match.group(1)
+
+        plain_match = re.search(r"https?:\/\/[^\s<>()]+", t, re.IGNORECASE)
+        if plain_match:
+            return plain_match.group(0)
+
+        return None
+
+    def _extract_base64_from_dict(self, item: Dict[str, Any]) -> Optional[str]:
+        """从常见图片字段提取 base64。"""
+        if not isinstance(item, dict):
+            return None
+        b64 = (
+            item.get("imageBase64")
+            or item.get("image_base64")
+            or item.get("b64_json")
+            or item.get("b64")
+            or item.get("result")
+        )
+        if isinstance(b64, str) and b64.strip():
+            return b64.strip()
+        return None
+
+    def _extract_image_from_openai_chat_message(self, message: Dict[str, Any]) -> Optional[str]:
+        """从 OpenAI chat message/delta 中提取图片 base64。"""
+        if not isinstance(message, dict):
+            return None
+
+        content = message.get("content")
+        images = message.get("images")
+
+        # 1) 字符串 content：json/data-url/纯 base64
+        if isinstance(content, str) and content.strip():
+            trimmed = content.strip()
+
+            if (trimmed.startswith("{") and trimmed.endswith("}")) or (
+                trimmed.startswith("[") and trimmed.endswith("]")
+            ):
+                try:
+                    parsed = json.loads(trimmed)
+                    if isinstance(parsed, dict):
+                        b64 = self._extract_base64_from_dict(parsed)
+                        if b64:
+                            return b64
+                    elif isinstance(parsed, list):
+                        for entry in parsed:
+                            if isinstance(entry, dict):
+                                b64 = self._extract_base64_from_dict(entry)
+                                if b64:
+                                    return b64
+                except Exception:
+                    pass
+
+            data_url_b64 = self._extract_image_from_data_url(trimmed)
+            if data_url_b64:
+                return data_url_b64
+
+            data_url_match = re.search(
+                r"data:image\/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=]+)",
+                content,
+                flags=re.IGNORECASE,
+            )
+            if data_url_match:
+                return data_url_match.group(1)
+
+            normalized = re.sub(r"\s+", "", trimmed)
+            if (
+                len(normalized) > 1024
+                and re.match(r"^[A-Za-z0-9+/=]+$", normalized)
+                and len(normalized) % 4 == 0
+            ):
+                return normalized
+
+        # 2) 多模态数组 content
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type", "")).lower()
+                if part_type == "image_url":
+                    image_url = part.get("image_url") or {}
+                    if isinstance(image_url, dict):
+                        url = image_url.get("url") or image_url.get("uri")
+                    else:
+                        url = image_url
+                    b64 = self._extract_image_from_data_url(url)
+                    if b64:
+                        return b64
+
+                if part_type in ("image", "output_image"):
+                    b64 = self._extract_base64_from_dict(part)
+                    if b64:
+                        return b64
+
+        # 3) message.images
+        if isinstance(images, list):
+            for part in images:
+                if not isinstance(part, dict):
+                    continue
+                image_url = part.get("image_url") or {}
+                if isinstance(image_url, dict):
+                    url = image_url.get("url") or image_url.get("uri")
+                    b64 = self._extract_image_from_data_url(url)
+                    if b64:
+                        return b64
+                b64 = self._extract_base64_from_dict(part)
+                if b64:
+                    return b64
+
+        return None
+
+    def _extract_image_from_responses_output(self, json_data: Dict[str, Any]) -> Optional[str]:
+        """从 OpenAI /v1/responses 响应格式提取图片 base64。"""
+        output = json_data.get("output")
+        if not isinstance(output, list):
+            return None
+
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+
+            b64 = self._extract_base64_from_dict(item)
+            if b64:
+                return b64
+
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    b64 = self._extract_base64_from_dict(part)
+                    if b64:
+                        return b64
+                    part_type = str(part.get("type", "")).lower()
+                    if part_type in ("image_url", "output_image"):
+                        image_url = part.get("image_url") or {}
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url") or image_url.get("uri")
+                        else:
+                            url = image_url
+                        b64 = self._extract_image_from_data_url(url)
+                        if b64:
+                            return b64
+
+        return None
+
     def _extract_image_from_openai_response(self, json_data: Dict[str, Any]) -> Optional[str]:
         """
         从 OpenAI 兼容响应中提取图片 base64。
-        支持 images/generations 和 chat/completions 两种格式。
+        支持 images/generations、chat/completions、responses 三种格式。
         """
         # 1. images/generations: {data: [{b64_json, url}]}
         if isinstance(json_data.get("data"), list) and json_data["data"]:
-            item = json_data["data"][0]
-            b64 = item.get("b64_json") or item.get("b64")
-            if isinstance(b64, str) and b64.strip():
-                return b64.strip()
-            # data URL
-            url = item.get("url", "")
-            if isinstance(url, str) and url.startswith("data:image"):
-                match = re.search(r"base64,([A-Za-z0-9+/=]+)", url)
-                if match:
-                    return match.group(1)
+            for item in json_data["data"]:
+                if not isinstance(item, dict):
+                    continue
+                b64 = self._extract_base64_from_dict(item)
+                if b64:
+                    return b64
+                url = item.get("url") or item.get("uri") or ""
+                b64_from_data_url = self._extract_image_from_data_url(url)
+                if b64_from_data_url:
+                    return b64_from_data_url
 
         # 2. chat/completions: {choices: [{message: {content}}]}
         if isinstance(json_data.get("choices"), list):
             for choice in json_data["choices"]:
                 msg = choice.get("message") or choice.get("delta") or choice
-                content = msg.get("content")
-                # 多模态数组
-                if isinstance(content, list):
-                    for part in content:
-                        part_type = str(part.get("type", "")).lower()
-                        if part_type == "image_url":
-                            url = (part.get("image_url") or {}).get("url", "")
-                            match = re.search(r"base64,([A-Za-z0-9+/=]+)", url)
-                            if match:
-                                return match.group(1)
-                        if part_type in ("image", "output_image"):
-                            b64 = part.get("image_base64") or part.get("b64_json") or part.get("b64")
-                            if isinstance(b64, str) and b64.strip():
-                                return b64.strip()
-                # 纯字符串 — 可能是 data URL 或纯 base64
-                if isinstance(content, str) and content.strip():
-                    trimmed = content.strip()
-                    match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", trimmed)
-                    if match:
-                        return match.group(1)
-                    # 纯 base64 字符串（>1KB 且只含合法字符）
-                    normalized = re.sub(r"\s+", "", trimmed)
-                    if (len(normalized) > 1024
-                            and re.match(r"^[A-Za-z0-9+/=]+$", normalized)
-                            and len(normalized) % 4 == 0):
-                        return normalized
+                b64 = self._extract_image_from_openai_chat_message(msg)
+                if b64:
+                    return b64
 
-        # 3. Gemini 兼容格式
+        # 3. responses: {output: [...]}
+        b64 = self._extract_image_from_responses_output(json_data)
+        if b64:
+            return b64
+
+        # 4. Gemini 兼容格式
         if isinstance(json_data.get("candidates"), list) and json_data["candidates"]:
             return self._extract_gemini_image(json_data)
 
@@ -363,21 +517,66 @@ class MultiProvider(BaseProvider):
     def _extract_http_url_from_openai_response(self, json_data: Dict[str, Any]) -> Optional[str]:
         """从 OpenAI 响应中提取 HTTP 图片 URL（用于远程下载）"""
         if isinstance(json_data.get("data"), list) and json_data["data"]:
-            url = json_data["data"][0].get("url", "")
-            if isinstance(url, str) and url.startswith(("http://", "https://")):
-                return url.strip()
+            for item in json_data["data"]:
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url") or item.get("uri") or ""
+                if isinstance(url, str) and url.startswith(("http://", "https://")):
+                    return url.strip()
 
         if isinstance(json_data.get("choices"), list):
             for choice in json_data["choices"]:
-                msg = choice.get("message") or {}
+                msg = choice.get("message") or choice.get("delta") or choice
+                if not isinstance(msg, dict):
+                    continue
                 content = msg.get("content", "")
                 if isinstance(content, str):
-                    match = re.search(r"https?://[^\s<>()]+", content)
-                    if match:
-                        return match.group(0)
+                    url = self._extract_http_image_url_from_text(content)
+                    if url:
+                        return url
                 if isinstance(content, list):
                     for part in content:
-                        url = (part.get("image_url") or {}).get("url", "")
+                        if not isinstance(part, dict):
+                            continue
+                        image_url = part.get("image_url") or {}
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url") or image_url.get("uri") or ""
+                        else:
+                            url = image_url
+                        if isinstance(url, str) and url.startswith(("http://", "https://")):
+                            return url.strip()
+
+                images = msg.get("images")
+                if isinstance(images, list):
+                    for part in images:
+                        if not isinstance(part, dict):
+                            continue
+                        image_url = part.get("image_url") or {}
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url") or image_url.get("uri") or ""
+                        else:
+                            url = image_url
+                        if isinstance(url, str) and url.startswith(("http://", "https://")):
+                            return url.strip()
+
+        output = json_data.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url") or item.get("uri") or ""
+                if isinstance(url, str) and url.startswith(("http://", "https://")):
+                    return url.strip()
+                content = item.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        image_url = part.get("image_url") or {}
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url") or image_url.get("uri") or ""
+                        else:
+                            url = image_url
                         if isinstance(url, str) and url.startswith(("http://", "https://")):
                             return url.strip()
         return None

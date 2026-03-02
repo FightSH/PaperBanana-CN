@@ -156,7 +156,7 @@ class RetrieverAgent(BaseAgent):
         print(f"[DEBUG] [RetrieverAgent] auto 检索 prompt: {prompt_chars:,} 字符 (~{prompt_chars//4:,} tokens), lite={lite}")
 
         # 根据 provider 路由 API 调用
-        if self.exp_config.provider == "evolink":
+        if self.exp_config.provider in ("evolink", "multi"):
             response_list = await generation_utils.call_evolink_text_with_retry_async(
                 model_name=self.model_name,
                 contents=content_list,
