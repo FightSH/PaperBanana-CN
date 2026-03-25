@@ -147,6 +147,7 @@ async def process_parallel_candidates(
 
     # 使用界面传入的配置初始化 Provider
     from utils import generation_utils
+    generation_utils.set_active_provider(provider)
     if provider == "multi":
         if multi_config:
             generation_utils.init_multi_provider(
@@ -615,6 +616,7 @@ def main():
                 st.session_state["tab1_api_key"] = _pd["api_key_default"]
                 st.rerun()
 
+            current_multi_config = None
             if provider == "multi":
                 # ---- MultiProvider: 文本和图像分别配置 ----
                 st.markdown("---")
@@ -674,6 +676,15 @@ def main():
                     key="tab1_multi_image_url",
                     help="如 https://generativelanguage.googleapis.com"
                 )
+                current_multi_config = {
+                    "text_api_style": text_api_style,
+                    "text_api_key": text_api_key,
+                    "text_base_url": text_base_url,
+                    "image_api_style": image_api_style,
+                    "image_api_key": image_api_key,
+                    "image_base_url": image_base_url,
+                    "image_openai_endpoint": openai_endpoint_mode,
+                }
                 st.markdown("---")
 
                 # multi 模式使用占位 api_key（实际 key 在上面分别配置）
@@ -707,9 +718,9 @@ def main():
                 col_t, col_i = st.columns(2)
                 with col_t:
                     if st.button("测试文本", key="test_multi_text", use_container_width=True):
-                        _ts = st.session_state.get("tab1_multi_text_style", "openai")
-                        _tk = st.session_state.get("tab1_multi_text_key", "")
-                        _tu = st.session_state.get("tab1_multi_text_url", "")
+                        _ts = current_multi_config["text_api_style"]
+                        _tk = current_multi_config["text_api_key"]
+                        _tu = current_multi_config["text_base_url"]
                         if not _tk or not _tu:
                             st.error("请先填写文本 API Key 和 Base URL")
                         else:
@@ -727,9 +738,9 @@ def main():
                                 st.success(f"文本 API 正常: {_res}")
                 with col_i:
                     if st.button("测试图像", key="test_multi_image", use_container_width=True):
-                        _is = st.session_state.get("tab1_multi_image_style", "gemini")
-                        _ik = st.session_state.get("tab1_multi_image_key", "")
-                        _iu = st.session_state.get("tab1_multi_image_url", "")
+                        _is = current_multi_config["image_api_style"]
+                        _ik = current_multi_config["image_api_key"]
+                        _iu = current_multi_config["image_base_url"]
                         if not _ik or not _iu:
                             st.error("请先填写图像 API Key 和 Base URL")
                         else:
@@ -739,7 +750,7 @@ def main():
                                     text_api_style="openai", text_api_key="placeholder",
                                     text_base_url="https://placeholder",
                                     image_api_style=_is, image_api_key=_ik, image_base_url=_iu,
-                                    image_openai_endpoint=st.session_state.get("tab1_multi_image_openai_endpoint", "auto"),
+                                    image_openai_endpoint=current_multi_config["image_openai_endpoint"],
                                 )
                                 _res = asyncio.run(_ip.test_image_connection(image_model_name))
                             if _res.startswith("Error"):
@@ -888,15 +899,7 @@ The framework extends to statistical plots by adjusting the Visualizer and Criti
                     # 构建 multi provider 配置（如果选中）
                     _multi_cfg = None
                     if provider == "multi":
-                        _multi_cfg = {
-                            "text_api_style": st.session_state.get("tab1_multi_text_style", "openai"),
-                            "text_api_key": st.session_state.get("tab1_multi_text_key", ""),
-                            "text_base_url": st.session_state.get("tab1_multi_text_url", ""),
-                            "image_api_style": st.session_state.get("tab1_multi_image_style", "gemini"),
-                            "image_api_key": st.session_state.get("tab1_multi_image_key", ""),
-                            "image_base_url": st.session_state.get("tab1_multi_image_url", ""),
-                            "image_openai_endpoint": st.session_state.get("tab1_multi_image_openai_endpoint", "auto"),
-                        }
+                        _multi_cfg = dict(current_multi_config or {})
 
                     # 并行处理
                     try:

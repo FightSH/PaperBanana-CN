@@ -703,9 +703,15 @@ class TestGenerationUtilsMulti:
         # 清理
         generation_utils.multi_provider = None
 
-    def test_init_multi_provider_skips_empty_key(self):
+    def test_init_multi_provider_clears_old_instance_when_key_is_empty(self):
         from utils import generation_utils
-        old = generation_utils.multi_provider
+        old_multi_provider = generation_utils.multi_provider
+        old_active_provider_name = getattr(generation_utils, "active_provider_name", None)
+        generation_utils.multi_provider = make_provider(
+            text_base_url="https://old-text.example.com",
+            image_base_url="https://old-image.example.com",
+        )
+        generation_utils.set_active_provider("multi")
         generation_utils.init_multi_provider(
             text_api_style="openai",
             text_api_key="",
@@ -714,7 +720,53 @@ class TestGenerationUtilsMulti:
             image_api_key="",
             image_base_url="",
         )
-        assert generation_utils.multi_provider is old
+        assert generation_utils.multi_provider is None
+        generation_utils.multi_provider = old_multi_provider
+        generation_utils.set_active_provider(old_active_provider_name)
+
+    @pytest.mark.asyncio
+    async def test_call_evolink_text_uses_active_provider_instance(self):
+        from utils import generation_utils
+
+        class DummyProvider:
+            def __init__(self, name):
+                self.name = name
+
+            async def generate_text(self, **kwargs):
+                return [self.name]
+
+        old_multi_provider = generation_utils.multi_provider
+        old_evolink_provider = generation_utils.evolink_provider
+        old_active_provider_name = getattr(generation_utils, "active_provider_name", None)
+
+        try:
+            generation_utils.multi_provider = DummyProvider("multi-new-url")
+            generation_utils.evolink_provider = DummyProvider("evolink-url")
+
+            generation_utils.set_active_provider("evolink")
+            evolink_result = await generation_utils.call_evolink_text_with_retry_async(
+                model_name="test-model",
+                contents=[{"type": "text", "text": "hello"}],
+                config={"system_prompt": "", "temperature": 0, "max_output_tokens": 16},
+                max_attempts=1,
+                retry_delay=0,
+            )
+
+            generation_utils.set_active_provider("multi")
+            multi_result = await generation_utils.call_evolink_text_with_retry_async(
+                model_name="test-model",
+                contents=[{"type": "text", "text": "hello"}],
+                config={"system_prompt": "", "temperature": 0, "max_output_tokens": 16},
+                max_attempts=1,
+                retry_delay=0,
+            )
+        finally:
+            generation_utils.multi_provider = old_multi_provider
+            generation_utils.evolink_provider = old_evolink_provider
+            generation_utils.set_active_provider(old_active_provider_name)
+
+        assert evolink_result == ["evolink-url"]
+        assert multi_result == ["multi-new-url"]
 
 
 # ==================== Agent 路由测试（multi provider） ====================

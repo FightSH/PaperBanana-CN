@@ -48,6 +48,7 @@ def get_config_val(section, key, env_var, default=""):
 
 evolink_provider = None
 multi_provider = None
+active_provider_name = None
 
 evolink_api_key = get_config_val("evolink", "api_key", "EVOLINK_API_KEY", "")
 evolink_base_url = get_config_val("evolink", "base_url", "EVOLINK_BASE_URL", "https://api.evolink.ai")
@@ -78,6 +79,50 @@ if model_config.get("multi"):
         )
         print(f"已初始化 MultiProvider (text={_text_cfg.get('api_style')}, image={_image_cfg.get('api_style')})")
 
+if multi_provider is not None:
+    active_provider_name = "multi"
+elif evolink_provider is not None:
+    active_provider_name = "evolink"
+
+
+async def _close_provider_quietly(provider):
+    """尽力关闭旧 Provider，避免共享 session 泄漏。"""
+    if provider is None or not hasattr(provider, "close"):
+        return
+    try:
+        await provider.close()
+    except Exception as e:
+        print(f"[generation_utils] 关闭旧 Provider 失败: {e}")
+
+
+def _dispose_provider(provider):
+    """同步/异步上下文下都可安全调度关闭旧 Provider。"""
+    if provider is None or not hasattr(provider, "close"):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_close_provider_quietly(provider))
+    else:
+        loop.create_task(_close_provider_quietly(provider))
+
+
+def set_active_provider(provider_name: str | None):
+    """记录当前运行使用的 Provider，避免误复用旧实例。"""
+    global active_provider_name
+    active_provider_name = provider_name
+
+
+def _get_active_evolink_like_provider():
+    """按当前激活 Provider 精确选择 evolink/multi 实例。"""
+    if active_provider_name == "multi":
+        return multi_provider
+    if active_provider_name == "evolink":
+        return evolink_provider
+    if active_provider_name is None:
+        return multi_provider or evolink_provider
+    return None
+
 
 def init_multi_provider(
     text_api_style: str, text_api_key: str, text_base_url: str,
@@ -86,9 +131,14 @@ def init_multi_provider(
 ):
     """用指定参数初始化或更新 MultiProvider（供界面动态传入）。"""
     global multi_provider
+    set_active_provider("multi")
     if not text_api_key or not image_api_key:
+        _dispose_provider(multi_provider)
+        multi_provider = None
+        print("警告：MultiProvider 缺少文本或图像 API Key，已清空旧实例。")
         return
     from providers.multi import MultiProvider
+    old_provider = multi_provider
     multi_provider = MultiProvider(
         text_api_style=text_api_style,
         text_api_key=text_api_key,
@@ -98,8 +148,11 @@ def init_multi_provider(
         image_base_url=image_base_url,
         image_openai_endpoint=image_openai_endpoint,
     )
+    if old_provider is not None and old_provider is not multi_provider:
+        _dispose_provider(old_provider)
     print(
-        f"已通过界面初始化 MultiProvider (text={text_api_style}, image={image_api_style}, "
+        f"已通过界面初始化 MultiProvider (text={text_api_style}, text_base_url={text_base_url}, "
+        f"image={image_api_style}, image_base_url={image_base_url}, "
         f"image_openai_endpoint={image_openai_endpoint})"
     )
 
@@ -107,17 +160,25 @@ def init_multi_provider(
 def init_evolink_provider(api_key: str, base_url: str = ""):
     """用指定的 API Key 初始化或更新 Evolink Provider（供界面动态传入）。"""
     global evolink_provider
+    set_active_provider("evolink")
     if not api_key:
+        _dispose_provider(evolink_provider)
+        evolink_provider = None
+        print("警告：Evolink Provider 缺少 API Key，已清空旧实例。")
         return
     url = base_url or evolink_base_url
     from providers.evolink import EvolinkProvider
+    old_provider = evolink_provider
     evolink_provider = EvolinkProvider(api_key=api_key, base_url=url)
+    if old_provider is not None and old_provider is not evolink_provider:
+        _dispose_provider(old_provider)
     print(f"已通过界面初始化 Evolink Provider (base_url={url})")
 
 
 def init_gemini_client(api_key: str):
     """用指定的 API Key 初始化或更新 Gemini Client（供界面动态传入）。"""
     global gemini_client
+    set_active_provider("gemini")
     if not api_key:
         return
     try:
@@ -228,9 +289,10 @@ async def call_evolink_text_with_retry_async(
     ctx = f", error_context={error_context}" if error_context else ""
     print(
         f"[DEBUG] call_evolink_text: model={model_name}, "
-        f"provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}{ctx}"
+        f"provider={active_provider_name or '未指定'} / "
+        f"{'已初始化' if _get_active_evolink_like_provider() else '未初始化'}{ctx}"
     )
-    provider = multi_provider or evolink_provider
+    provider = _get_active_evolink_like_provider()
     if provider is None:
         raise RuntimeError("Evolink/Multi Provider 未初始化，请检查 API Key 配置。")
 
@@ -295,9 +357,10 @@ async def call_evolink_image_with_retry_async(
     ctx = f", error_context={error_context}" if error_context else ""
     print(
         f"[DEBUG] call_evolink_image: model={model_name}, config={config}, "
-        f"provider={'已初始化' if (multi_provider or evolink_provider) else '未初始化'}{ctx}"
+        f"provider={active_provider_name or '未指定'} / "
+        f"{'已初始化' if _get_active_evolink_like_provider() else '未初始化'}{ctx}"
     )
-    provider = multi_provider or evolink_provider
+    provider = _get_active_evolink_like_provider()
     if provider is None:
         raise RuntimeError("Evolink/Multi Provider 未初始化，请检查 API Key 配置。")
 
